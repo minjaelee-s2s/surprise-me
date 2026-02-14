@@ -7,108 +7,85 @@ import re
 import google.generativeai as genai
 import json
 from PIL import Image
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
-# --- 파일 경로 설정 ---
-PANTRY_FILE = "pantry.csv"
-RECIPE_FILE = "recipes.csv"
+# --- 구글 시트 설정 ---
+# 시트 이름과 워크시트(탭) 이름이 정확해야 합니다!
+SHEET_NAME = "cooking_db"
+PANTRY_TAB = "pantry"
+RECIPE_TAB = "recipes"
 
 # --- 단위 변환 설정 (계란 1판 = 18개) ---
 UNIT_MAP = {"판": 18, "다발": 10, "봉": 1, "개": 1, "인분": 1}
 
-# --- [스타일] 귀염 & 깔끔 테마 (모바일 최적화 추가) ---
+# --- [스타일] 귀염 & 깔끔 테마 (반응형 적용) ---
 def apply_cute_style():
     st.markdown("""
         <style>
-        /* 폰트 임포트 (고운돋움 - 얇고 깔끔함) */
         @import url('https://fonts.googleapis.com/css2?family=Gowun+Dodum&display=swap');
-
-        /* 1. 배경 설정 */
-        .stApp {
-            background-color: #FFF9C4 !important;
-        }
-        
-        /* 2. 텍스트에 폰트 적용 */
+        .stApp { background-color: #FFF9C4 !important; }
         h1, h2, h3, p, label, div[data-testid="stMarkdownContainer"], div[data-baseweb="select"] {
             font-family: 'Gowun Dodum', sans-serif !important;
             color: #5D4037 !important;
         }
-        
-        /* 3. [수정됨] 제목 스타일 (반응형 적용) */
         .main-title {
-            font-weight: bold;
-            color: #5D4037;
-            margin-bottom: 20px;
-            font-family: 'Gowun Dodum', sans-serif !important;
-            word-break: keep-all; /* 단어 중간에 끊기지 않게 */
+            font-weight: bold; color: #5D4037; margin-bottom: 20px;
+            font-family: 'Gowun Dodum', sans-serif !important; word-break: keep-all;
         }
-
-        /* PC에서는 크게 */
-        @media (min-width: 601px) {
-            .main-title { font-size: 3rem; }
-        }
-        
-        /* 모바일(폰)에서는 작게 -> 한 줄에 쏙 들어오게! */
-        @media (max-width: 600px) {
-            .main-title { font-size: 1.8rem; }
-            h2 { font-size: 1.5rem !important; } /* 소제목도 살짝 줄임 */
-        }
-
-        /* 4. 버튼 디자인 */
+        @media (min-width: 601px) { .main-title { font-size: 3rem; } }
+        @media (max-width: 600px) { .main-title { font-size: 1.8rem; } h2 { font-size: 1.5rem !important; } }
         div.stButton > button {
-            border-radius: 20px !important; 
-            background: linear-gradient(to bottom right, #FFAB91, #FFCCBC) !important; 
-            color: white !important;
-            border: none !important;
-            box-shadow: 2px 2px 5px rgba(0,0,0,0.1) !important;
-            font-family: 'Gowun Dodum', sans-serif !important; 
-            font-size: 1.1rem !important;
-            font-weight: bold !important;
-            padding-top: 10px !important;
-            padding-bottom: 10px !important;
-            transition: all 0.2s ease-in-out !important;
+            border-radius: 20px !important; background: linear-gradient(to bottom right, #FFAB91, #FFCCBC) !important;
+            color: white !important; border: none !important; box-shadow: 2px 2px 5px rgba(0,0,0,0.1) !important;
+            font-family: 'Gowun Dodum', sans-serif !important; font-size: 1.1rem !important; font-weight: bold !important;
+            padding-top: 10px !important; padding-bottom: 10px !important; transition: all 0.2s ease-in-out !important;
         }
-        div.stButton > button:hover {
-            transform: scale(1.02) !important; 
-            background: linear-gradient(to bottom right, #FF8A65, #FFAB91) !important;
-            color: white !important;
-        }
-        
-        /* 5. 입력창 디자인 */
+        div.stButton > button:hover { transform: scale(1.02) !important; background: linear-gradient(to bottom right, #FF8A65, #FFAB91) !important; color: white !important; }
         div[data-baseweb="input"] > div, div[data-baseweb="textarea"] > div {
-            border-radius: 15px !important;
-            border: 2px solid #FFE082 !important; 
-            background-color: #FFFDE7 !important;
+            border-radius: 15px !important; border: 2px solid #FFE082 !important; background-color: #FFFDE7 !important;
         }
-        
-        /* 6. 사이드바 디자인 */
-        section[data-testid="stSidebar"] {
-            background-color: #FFF59D !important;
-        }
-        
-        /* 7. 냉장고 카드 디자인 */
+        section[data-testid="stSidebar"] { background-color: #FFF59D !important; }
         div[data-testid="stVerticalBlockBorderWrapper"] {
-            border-radius: 15px !important;
-            border: 2px solid #AED581 !important; 
-            background-color: #F1F8E9 !important; 
-            padding: 15px !important;
+            border-radius: 15px !important; border: 2px solid #AED581 !important; background-color: #F1F8E9 !important; padding: 15px !important;
         }
-
-        /* 8. 라디오 버튼/체크박스 폰트 적용 */
-        div[data-baseweb="radio"] label, div[data-baseweb="checkbox"] label {
-            font-family: 'Gowun Dodum', sans-serif !important;
-        }
+        div[data-baseweb="radio"] label, div[data-baseweb="checkbox"] label { font-family: 'Gowun Dodum', sans-serif !important; }
         </style>
     """, unsafe_allow_html=True)
 
-# --- 데이터 로드/저장 함수 ---
-def load_data(file_path, columns):
-    if os.path.exists(file_path):
-        try: return pd.read_csv(file_path)
-        except: return pd.DataFrame(columns=columns)
-    return pd.DataFrame(columns=columns)
+# --- 구글 시트 연결 함수 ---
+def get_gsheet_client():
+    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+    # Streamlit Secrets에서 로봇 키 가져오기
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    client = gspread.authorize(creds)
+    return client
 
-def save_data(df, file_path):
-    df.to_csv(file_path, index=False)
+# --- 데이터 로드 (구글 시트 -> DataFrame) ---
+def load_data(tab_name, columns):
+    try:
+        client = get_gsheet_client()
+        sheet = client.open(SHEET_NAME).worksheet(tab_name)
+        data = sheet.get_all_records()
+        df = pd.DataFrame(data)
+        # 데이터가 비어있어도 컬럼은 유지
+        if df.empty: return pd.DataFrame(columns=columns)
+        return df
+    except Exception as e:
+        # st.error(f"데이터 로드 실패: {e}") # 디버깅용
+        return pd.DataFrame(columns=columns)
+
+# --- 데이터 저장 (DataFrame -> 구글 시트) ---
+def save_data(df, tab_name):
+    try:
+        client = get_gsheet_client()
+        sheet = client.open(SHEET_NAME).worksheet(tab_name)
+        sheet.clear() # 싹 지우고
+        # 헤더 포함해서 다시 쓰기
+        sheet.update([df.columns.values.tolist()] + df.values.tolist())
+    except Exception as e:
+        st.error(f"저장 실패: {e}")
 
 def parse_quantity(text_qty):
     if not text_qty or str(text_qty).strip() == "": return 1
@@ -151,13 +128,8 @@ with st.sidebar:
     st.title("🧸 메뉴") 
     menu_options = ["🍳 요리하기", "🧊 냉장고 관리", "📖 레시피 관리"]
     
-    view_map = {
-        "🍳 요리하기": "요리하기",
-        "🧊 냉장고 관리": "냉장고 관리",
-        "📖 레시피 관리": "레시피 관리"
-    }
+    view_map = {"🍳 요리하기": "요리하기", "🧊 냉장고 관리": "냉장고 관리", "📖 레시피 관리": "레시피 관리"}
     current_label = [k for k, v in view_map.items() if v == st.session_state['current_view']][0]
-    
     selected_label = st.radio("이동하기", menu_options, index=menu_options.index(current_label))
     
     if view_map[selected_label] != st.session_state['current_view']:
@@ -172,15 +144,20 @@ with st.sidebar:
         api_key_input = st.text_input("🔑 Gemini API Key", type="password")
         if api_key_input: os.environ["GEMINI_API_KEY"] = api_key_input
 
-# --- 데이터 불러오기 ---
-pantry_df = load_data(PANTRY_FILE, ["재료명", "수량", "유통기한"])
-recipe_df = load_data(RECIPE_FILE, ["요리명", "필수재료", "링크", "조리법"])
-if not pantry_df.empty:
-    pantry_df['유통기한'] = pd.to_datetime(pantry_df['유통기한'], errors='coerce').dt.date
-    pantry_df['수량'] = pd.to_numeric(pantry_df['수량'], errors='coerce').fillna(1).astype(int)
+# --- 데이터 불러오기 (구글 시트에서) ---
+# 기존 파일 로드 대신 load_data 함수 사용
+pantry_df = load_data(PANTRY_TAB, ["재료명", "수량", "유통기한"])
+recipe_df = load_data(RECIPE_TAB, ["요리명", "필수재료", "링크", "조리법"])
+
 today = date.today()
 
-# [수정됨] 메인 타이틀 (HTML로 직접 렌더링)
+# 날짜/수량 데이터 전처리
+if not pantry_df.empty:
+    # 빈 문자열이나 None 처리
+    pantry_df['유통기한'] = pd.to_datetime(pantry_df['유통기한'], errors='coerce').dt.date
+    pantry_df['수량'] = pd.to_numeric(pantry_df['수량'], errors='coerce').fillna(1).astype(int)
+
+# 메인 타이틀
 st.markdown('<div class="main-title">🍳 오늘 뭐 먹지?</div>', unsafe_allow_html=True)
 
 # ==========================================
@@ -190,12 +167,14 @@ if st.session_state['current_view'] == "요리하기":
     st.header("😋 추천 메뉴")
     my_ingredients = set(pantry_df['재료명'].str.strip().tolist()) if not pantry_df.empty else set()
     possible_menus = []
-    for index, row in recipe_df.iterrows():
-        if pd.isna(row['필수재료']): continue
-        needed = set([x.strip() for x in str(row['필수재료']).split(',')])
-        missing = needed - my_ingredients
-        if len(missing) == 0: row['부족한재료'] = []; possible_menus.append(row)
-        elif len(missing) <= 2: row['부족한재료'] = list(missing); possible_menus.append(row)
+    
+    if not recipe_df.empty:
+        for index, row in recipe_df.iterrows():
+            if pd.isna(row['필수재료']) or str(row['필수재료']).strip() == "": continue
+            needed = set([x.strip() for x in str(row['필수재료']).split(',')])
+            missing = needed - my_ingredients
+            if len(missing) == 0: row['부족한재료'] = []; possible_menus.append(row)
+            elif len(missing) <= 2: row['부족한재료'] = list(missing); possible_menus.append(row)
 
     if possible_menus:
         st.write("")
@@ -216,7 +195,7 @@ if st.session_state['current_view'] == "요리하기":
                     st.session_state['highlight_items'] = [x.strip() for x in str(menu['필수재료']).split(',')]
                     st.session_state['current_view'] = "냉장고 관리"
                     st.rerun()
-    else: st.warning("냉장고가 텅 비었어요! 재료를 채워주세요 🛒")
+    else: st.warning("냉장고가 텅 비었거나 레시피가 부족해요! 🛒")
 
 # ==========================================
 # 뷰 2: 냉장고 관리
@@ -231,24 +210,36 @@ elif st.session_state['current_view'] == "냉장고 관리":
         if not pantry_df.empty:
             for idx, row in pantry_df.iterrows():
                 icon = "🔴" if row['재료명'] in st.session_state['highlight_items'] else "🟢"
-                if pd.isna(row['유통기한']): d_day_str = "(소스/조미료)"; display_style = "color:#8D6E63;" 
+                
+                # 유통기한 처리 (None/NaT 체크)
+                if pd.isna(row['유통기한']): 
+                    d_day_str = "(소스/조미료)"
+                    display_style = "color:#8D6E63;" 
                 else:
-                    d_day = (row['유통기한'] - today).days
-                    d_day_str = f"({d_day}일 남음)" if d_day >= 0 else "(지남!!)"
-                    display_style = "color:#FF7043;" if d_day < 3 else "color:#8D6E63;"
+                    try:
+                        d_day = (row['유통기한'] - today).days
+                        d_day_str = f"({d_day}일 남음)" if d_day >= 0 else "(지남!!)"
+                        display_style = "color:#FF7043;" if d_day < 3 else "color:#8D6E63;"
+                    except: # 날짜 형식이 잘못된 경우 대비
+                         d_day_str = "(날짜 오류)"
+                         display_style = "color:gray;"
 
                 with st.container(border=True):
                     sc1, sc2, sc3, sc4 = st.columns([3, 1, 1, 1])
                     sc1.markdown(f"**{icon} {row['재료명']}** : {row['수량']}개 <span style='{display_style} font-size:0.8em'>{d_day_str}</span>", unsafe_allow_html=True)
                     
                     with sc2: 
-                        if st.button("➕", key=f"p{idx}"): pantry_df.at[idx, '수량'] += 1; save_data(pantry_df, PANTRY_FILE); st.rerun()
+                        if st.button("➕", key=f"p{idx}"): 
+                            pantry_df.at[idx, '수량'] += 1
+                            save_data(pantry_df, PANTRY_TAB); st.rerun()
                     with sc3: 
                         if st.button("➖", key=f"m{idx}"):
                              if pantry_df.at[idx, '수량'] > 0: pantry_df.at[idx, '수량'] -= 1
-                             save_data(pantry_df, PANTRY_FILE); st.rerun()
+                             save_data(pantry_df, PANTRY_TAB); st.rerun()
                     with sc4: 
-                        if st.button("🗑️", key=f"d{idx}"): pantry_df = pantry_df.drop(idx); save_data(pantry_df, PANTRY_FILE); st.rerun()
+                        if st.button("🗑️", key=f"d{idx}"): 
+                            pantry_df = pantry_df.drop(idx)
+                            save_data(pantry_df, PANTRY_TAB); st.rerun()
 
     with c2:
         st.subheader("🛒 재료 채우기")
@@ -265,11 +256,12 @@ elif st.session_state['current_view'] == "냉장고 관리":
             st.write("") 
             if st.form_submit_button("✨ 냉장고에 넣기", use_container_width=True):
                 if n:
-                    if is_sauce or is_seasoning: final_q = 1; final_d = None
-                    else: final_q = parse_quantity(q); final_d = d
+                    if is_sauce or is_seasoning: final_q = 1; final_d = "" # 구글 시트엔 빈칸("")으로 저장
+                    else: final_q = parse_quantity(q); final_d = str(d) # 날짜를 문자열로 저장
+                    
                     new_row = pd.DataFrame({"재료명": [n], "수량": [final_q], "유통기한": [final_d]})
                     pantry_df = pd.concat([pantry_df, new_row], ignore_index=True)
-                    save_data(pantry_df, PANTRY_FILE); st.rerun()
+                    save_data(pantry_df, PANTRY_TAB); st.rerun()
                 else: st.warning("재료 이름은 꼭 적어주세요! 🥺")
 
 # ==========================================
@@ -303,7 +295,7 @@ elif st.session_state['current_view'] == "레시피 관리":
             if st.form_submit_button("✨ 레시피북에 저장", use_container_width=True):
                 new_rec = pd.DataFrame({"요리명": [rn], "필수재료": [ri], "링크": [rl], "조리법": [rs]})
                 recipe_df = pd.concat([recipe_df, new_rec], ignore_index=True)
-                save_data(recipe_df, RECIPE_FILE)
+                save_data(recipe_df, RECIPE_TAB)
                 st.session_state['ai_result'] = {}
                 st.success("저장 완료! 맛있게 해드세요 😋"); st.rerun()
     with t2:
@@ -312,4 +304,4 @@ elif st.session_state['current_view'] == "레시피 관리":
             st.write("")
             if st.button("💾 변경사항 저장하기", use_container_width=True):
                 clean_df = edited_df[edited_df['요리명'].notna() & (edited_df['요리명'] != "")]
-                save_data(clean_df, RECIPE_FILE); st.success("저장되었어요! (빈 줄은 삭제됨)"); st.rerun()
+                save_data(clean_df, RECIPE_TAB); st.success("저장되었어요! (빈 줄은 삭제됨)"); st.rerun()
