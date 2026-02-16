@@ -123,15 +123,23 @@ def analyze_recipe_image_with_ai(api_key, images):
 st.set_page_config(page_title="오늘 뭐 먹지?", page_icon="🍳", layout="wide") 
 apply_cute_style() 
 
-# [NEW] 토스트 메시지 처리 (새로고침 후에도 메시지가 뜨도록 세션 상태 활용)
+# 토스트 메시지 처리
 if 'toast_msg' not in st.session_state: st.session_state['toast_msg'] = None
 if st.session_state['toast_msg']:
-    st.toast(st.session_state['toast_msg'], icon="✅") # 화면에 알림 띄우기
-    st.session_state['toast_msg'] = None # 알림 띄웠으니 초기화
+    st.toast(st.session_state['toast_msg'], icon="✅")
+    st.session_state['toast_msg'] = None
 
+# 상태 초기화
 if 'current_view' not in st.session_state: st.session_state['current_view'] = '요리하기'
 if 'highlight_items' not in st.session_state: st.session_state['highlight_items'] = []
 if 'ai_result' not in st.session_state: st.session_state['ai_result'] = {"name": "", "ingredients": "", "steps": ""}
+
+# [NEW] 입력 폼 상태 관리 (입력값 유지를 위해 필요)
+if 'input_name' not in st.session_state: st.session_state['input_name'] = ""
+if 'input_qty' not in st.session_state: st.session_state['input_qty'] = ""
+if 'input_date' not in st.session_state: st.session_state['input_date'] = date.today() + timedelta(days=7)
+if 'chk_sauce' not in st.session_state: st.session_state['chk_sauce'] = False
+if 'chk_season' not in st.session_state: st.session_state['chk_season'] = False
 
 # --- 사이드바 ---
 with st.sidebar:
@@ -242,27 +250,44 @@ elif st.session_state['current_view'] == "냉장고 관리":
 
     with c2:
         st.subheader("🛒 재료 채우기")
-        with st.form("add"):
-            n = st.text_input("재료명 (필수!)")
-            st.caption("👇 소스나 조미료면 체크! (날짜 신경 안 써도 돼요)")
-            chk_col1, chk_col2 = st.columns(2)
-            with chk_col1: is_sauce = st.checkbox("🥫 소스")
-            with chk_col2: is_seasoning = st.checkbox("🧂 조미료")
-            col_q, col_d = st.columns(2)
-            with col_q: q = st.text_input("수량", placeholder="예: 1판 (18개)")
-            with col_d: d = st.date_input("유통기한", value=today + timedelta(days=7))
-            
-            st.write("") 
-            if st.form_submit_button("✨ 냉장고에 넣기", use_container_width=True):
-                if n:
-                    if is_sauce or is_seasoning: final_q = 1; final_d = "" 
-                    else: final_q = parse_quantity(q); final_d = str(d)
-                    
-                    add_row_to_sheet([n, final_q, final_d], PANTRY_TAB)
-                    # [NEW] 저장 성공 메시지 설정
-                    st.session_state['toast_msg'] = f"🧊 '{n}' 저장 완료! 냉장고로 슝~"
-                    st.rerun()
-                else: st.warning("재료 이름은 꼭 적어주세요! 🥺")
+        
+        # [NEW] 간편 날짜 버튼 영역
+        db1, db2, db3 = st.columns([1, 1, 2])
+        if db1.button("📅 +1주"):
+            st.session_state['input_date'] = today + timedelta(weeks=1)
+            st.rerun()
+        if db2.button("📅 +1달"):
+            st.session_state['input_date'] = today + timedelta(days=30)
+            st.rerun()
+
+        # 입력 필드들 (Form 없이 바로 입력받음 -> 버튼 클릭 시 입력값 유지)
+        n = st.text_input("재료명 (필수!)", key="input_name")
+        
+        chk_col1, chk_col2 = st.columns(2)
+        with chk_col1: is_sauce = st.checkbox("🥫 소스", key="chk_sauce")
+        with chk_col2: is_seasoning = st.checkbox("🧂 조미료", key="chk_season")
+        
+        col_q, col_d = st.columns(2)
+        with col_q: q = st.text_input("수량", placeholder="예: 1판", key="input_qty")
+        with col_d: d = st.date_input("유통기한", key="input_date")
+        
+        st.write("") 
+        if st.button("✨ 냉장고에 넣기", use_container_width=True):
+            if n:
+                if is_sauce or is_seasoning: final_q = 1; final_d = "" 
+                else: final_q = parse_quantity(q); final_d = str(d)
+                
+                add_row_to_sheet([n, final_q, final_d], PANTRY_TAB)
+                st.session_state['toast_msg'] = f"🧊 '{n}' 저장 완료! 냉장고로 슝~"
+                
+                # 입력창 초기화
+                st.session_state['input_name'] = ""
+                st.session_state['input_qty'] = ""
+                st.session_state['input_date'] = today + timedelta(days=7)
+                st.session_state['chk_sauce'] = False
+                st.session_state['chk_season'] = False
+                st.rerun()
+            else: st.warning("재료 이름은 꼭 적어주세요! 🥺")
 
 # ==========================================
 # 뷰 3: 레시피 관리
@@ -295,7 +320,6 @@ elif st.session_state['current_view'] == "레시피 관리":
             if st.form_submit_button("✨ 레시피북에 저장", use_container_width=True):
                 add_row_to_sheet([rn, ri, rl, rs], RECIPE_TAB)
                 st.session_state['ai_result'] = {}
-                # [NEW] 저장 성공 메시지 설정
                 st.session_state['toast_msg'] = f"📖 '{rn}' 레시피북에 저장 완료!"
                 st.rerun()
     with t2:
@@ -303,12 +327,8 @@ elif st.session_state['current_view'] == "레시피 관리":
             edited_df = st.data_editor(recipe_df, num_rows="dynamic", use_container_width=True, key="recipe_editor", column_config={"링크": st.column_config.LinkColumn("링크"), "조리법": st.column_config.TextColumn("조리법", width="large")})
             st.write("")
             if st.button("💾 변경사항 저장하기", use_container_width=True):
-                # 1. 빈 줄 제거
                 clean_df = edited_df[edited_df['요리명'].notna() & (edited_df['요리명'] != "")]
-                # 2. 중복 제거
                 deduplicated_df = clean_df.drop_duplicates(subset=['요리명', '링크'], keep='first')
-                
-                # 3. 저장
                 save_data_overwrite(deduplicated_df, RECIPE_TAB)
                 st.session_state['toast_msg'] = "💾 변경사항 저장 완료! (중복도 정리했어요)"
                 st.rerun()
