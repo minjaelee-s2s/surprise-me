@@ -104,10 +104,8 @@ def add_row_to_sheet(row_data, tab_name):
         client = get_gsheet_client()
         sheet = client.open(SHEET_NAME).worksheet(tab_name)
         sheet.append_row(row_data)
-        
         load_data.clear()
         time.sleep(0.5)
-        
     except Exception as e:
         st.error(f"추가 실패: {e}")
 
@@ -131,9 +129,9 @@ def analyze_recipe_image_with_ai(api_key, images):
     st.error("❌ 분석 실패. API 키 확인 필요.")
     return None
 
-# --- 콜백 함수들 ---
+# --- [수정됨] 콜백 함수들 (중복 방지 로직 추가) ---
 def handle_add_pantry():
-    n = st.session_state.get('input_name', "")
+    n = st.session_state.get('input_name', "").strip() # 공백 제거
     d = st.session_state.get('input_date', date.today())
     is_sauce = st.session_state.get('chk_sauce', False)
     is_seasoning = st.session_state.get('chk_season', False)
@@ -142,10 +140,21 @@ def handle_add_pantry():
         if is_sauce or is_seasoning: final_d = "" 
         else: final_d = str(d)
         
-        # [수정됨] 수량 없이 이름과 날짜만 저장
-        add_row_to_sheet([n, final_d], PANTRY_TAB)
-        st.session_state['toast_msg'] = f"🧊 '{n}' 저장 완료! 냉장고로 슝~"
+        # 1. 중복 확인을 위해 최신 데이터 로드
+        current_df = load_data(PANTRY_TAB, ["재료명", "유통기한"])
         
+        # 2. 이미 있는 재료인지 확인
+        if n in current_df['재료명'].values:
+            # 중복이면: 기존꺼 지우고 새로 업데이트 (덮어쓰기 방식)
+            current_df.loc[current_df['재료명'] == n, '유통기한'] = final_d
+            save_data_overwrite(current_df, PANTRY_TAB)
+            st.session_state['toast_msg'] = f"🔄 '{n}' 정보 업데이트 완료!"
+        else:
+            # 없으면: 그냥 추가 (append 방식 - 더 빠름)
+            add_row_to_sheet([n, final_d], PANTRY_TAB)
+            st.session_state['toast_msg'] = f"🧊 '{n}' 저장 완료! 냉장고로 슝~"
+        
+        # 입력창 초기화
         st.session_state['input_name'] = ""
         st.session_state['input_date'] = date.today() + timedelta(days=7)
         st.session_state['chk_sauce'] = False
@@ -196,7 +205,6 @@ with st.sidebar:
         api_key_input = st.text_input("🔑 Gemini API Key", type="password")
         if api_key_input: os.environ["GEMINI_API_KEY"] = api_key_input
 
-# [수정됨] 로드할 컬럼에서 '수량' 제거
 pantry_df = load_data(PANTRY_TAB, ["재료명", "유통기한"])
 recipe_df = load_data(RECIPE_TAB, ["요리명", "필수재료", "링크", "조리법"])
 today = date.today()
@@ -222,6 +230,7 @@ if st.session_state['current_view'] == "요리하기":
             if len(missing) == 0: row['부족한재료'] = []; possible_menus.append(row)
             elif len(missing) <= 2: row['부족한재료'] = list(missing); possible_menus.append(row)
 
+    # [수정됨] 상황별 친절한 안내 메시지 분기
     if possible_menus:
         st.write("")
         if st.button("🎲 랜덤 메뉴 추천받기!", use_container_width=True): 
@@ -241,7 +250,14 @@ if st.session_state['current_view'] == "요리하기":
                     st.session_state['highlight_items'] = [x.strip() for x in str(menu['필수재료']).split(',')]
                     st.session_state['current_view'] = "냉장고 관리"
                     st.rerun()
-    else: st.warning("냉장고가 텅 비었거나 레시피가 부족해요! 🛒")
+    else:
+        # 여기가 중요합니다! 상황에 따라 다른 말을 해줍니다.
+        if recipe_df.empty:
+            st.warning("📚 레시피북이 텅 비었어요! '레시피 관리' 탭에서 요리를 먼저 등록해주세요.")
+        elif pantry_df.empty:
+            st.warning("🧊 냉장고가 텅 비었어요! '냉장고 관리' 탭에서 재료를 채워주세요.")
+        else:
+            st.warning(f"😭 가진 재료({len(my_ingredients)}개)로 만들 수 있는 메뉴가 없어요.\n레시피를 더 등록하거나 부족한 재료를 사오세요!")
 
 # ==========================================
 # 뷰 2: 냉장고 관리
@@ -265,7 +281,6 @@ elif st.session_state['current_view'] == "냉장고 관리":
                     except: d_day_str = ""; display_style = ""
 
                 with st.container(border=True):
-                    # [수정됨] 화면 비율 조정 (이름영역 넓게, 삭제버튼 작게)
                     sc1, sc2 = st.columns([5, 1])
                     sc1.markdown(f"**{icon} {row['재료명']}** <span style='{display_style} font-size:0.9em; margin-left:10px;'>{d_day_str}</span>", unsafe_allow_html=True)
                     
@@ -290,7 +305,6 @@ elif st.session_state['current_view'] == "냉장고 관리":
         with chk_col1: st.checkbox("🥫 소스", key="chk_sauce")
         with chk_col2: st.checkbox("🧂 조미료", key="chk_season")
         
-        # [수정됨] 수량 입력창 완전 삭제
         st.date_input("유통기한", key="input_date")
         
         st.write("") 
