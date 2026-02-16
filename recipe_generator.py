@@ -115,12 +115,14 @@ def analyze_recipe_image_with_ai(api_key, images):
         except: continue
     return None
 
-# --- [수정됨] AI 메뉴 추천 (강력해진 프롬프트 + 안전장치) ---
-def get_ai_recommendations(api_key, pantry_list, recipe_list):
+# --- [수정됨] AI 메뉴 추천 (제외 목록 + 강력한 융통성) ---
+def get_ai_recommendations(api_key, pantry_list, recipe_list, excluded_list):
     genai.configure(api_key=api_key)
     models = ['gemini-1.5-flash', 'gemini-2.0-flash']
     
-    # [핵심] 민재 님이 제공한 '절대 규칙' 프롬프트 적용
+    # 제외 목록 처리
+    exclude_text = ', '.join(excluded_list) if excluded_list else "없음"
+
     prompt = f"""
     너는 절대 보수적으로 판단하지 않는 자취생 전용 AI 셰프다.
     목표는 "완벽한 레시피 재현"이 아니라 "지금 당장 해먹을 수 있는지" 판단하는 것이다.
@@ -130,6 +132,9 @@ def get_ai_recommendations(api_key, pantry_list, recipe_list):
 
     레시피 목록(JSON):
     {json.dumps(recipe_list, ensure_ascii=False)}
+
+    ⛔ [제외할 요리 (이미 추천함)]: {exclude_text}
+    위 '제외할 요리'에 있는 메뉴는 절대로 다시 추천하지 마. 다른 걸 찾아.
 
     ==========================
     [🔥 절대 규칙 - 반드시 따를 것 🔥]
@@ -143,24 +148,8 @@ def get_ai_recommendations(api_key, pantry_list, recipe_list):
        → 예: 김치찌개 = 김치만 있어도 추천.
 
     3. 다음 재료는 "존재하지 않아도 자동 통과":
-       - 대파
-       - 쪽파
-       - 양파
-       - 마늘
-       - 청양고추
-       - 고추
-       - 당근
-       - 깨
-       - 고춧가루
-       - 후추
-       - 참기름
-       - 식용유
-       - 소금
-       - 설탕
-       - 간장
-       - 고추장
-       - 맛술
-       - 물엿
+       - 대파, 쪽파, 양파, 마늘, 청양고추, 고추, 당근, 깨
+       - 고춧가루, 후추, 참기름, 식용유, 소금, 설탕, 간장, 고추장, 맛술, 물엿
 
     4. 고기류는 전부 같은 것으로 취급:
        - 목살 = 삼겹살 = 앞다리살 = 대패삼겹살 = 돼지고기
@@ -168,12 +157,9 @@ def get_ai_recommendations(api_key, pantry_list, recipe_list):
 
     5. "조금 부족하지만 만들 수 있음"은 무조건 가능으로 판정.
 
-    6. 절대 빈 배열을 반환하지 마라.
-       → 추천할 게 애매하면 가장 비슷한 요리라도 1개는 반드시 추천해라.
-       → recommendations는 최소 1개 이상이어야 한다.
+    6. 추천할 게 없으면 빈 배열 []을 반환해라. (내가 알아서 처리함)
 
     7. missing 필드에는 "없지만 생략 가능"한 재료만 적는다.
-       → 없다고 탈락시키지 마라.
 
     ==========================
 
@@ -195,23 +181,12 @@ def get_ai_recommendations(api_key, pantry_list, recipe_list):
             response = model.generate_content(prompt)
             text = response.text.replace("```json", "").replace("```", "").strip()
             result = json.loads(text)
-            
-            # AI가 빈 리스트를 줬을 경우를 대비해 에러 발생시켜서 아래 except로 보냄
-            if not result.get("recommendations"):
-                raise ValueError("Empty recommendations from AI")
-                
             return result
         except Exception as e:
             continue
             
-    # [안전장치] AI가 다 실패하거나 빈 배열을 주면, 강제로 첫 번째 레시피 추천
-    fallback_rec = {
-        # recipe_list의 첫번째 요리명을 가져옴 (없으면 기본 텍스트)
-        "name": recipe_list[0]['요리명'] if recipe_list else "추천 요리 없음",
-        "reason": "재료가 조금 부족해도 응용해서 만들 수 있어요! (AI가 엄격해서 제가 강제로 추천합니다 😅)",
-        "missing": "일부 부재료"
-    }
-    return {"recommendations": [fallback_rec]}
+    # AI 실패 시 빈 리스트 반환 (앱에서 처리)
+    return {"recommendations": []}
 
 # --- 콜백 함수 (재료 추가) ---
 def handle_add_pantry():
@@ -258,6 +233,9 @@ if 'highlight_items' not in st.session_state: st.session_state['highlight_items'
 if 'ai_result' not in st.session_state: st.session_state['ai_result'] = {"name": "", "ingredients": "", "steps": ""}
 if 'ai_recommendation' not in st.session_state: st.session_state['ai_recommendation'] = None
 
+# 추천 기록 (새로고침 전까지 유지)
+if 'shown_recipes' not in st.session_state: st.session_state['shown_recipes'] = []
+
 if 'input_name' not in st.session_state: st.session_state['input_name'] = ""
 if 'input_date' not in st.session_state: st.session_state['input_date'] = date.today() + timedelta(days=7)
 
@@ -280,6 +258,14 @@ with st.sidebar:
         api_key_input = st.text_input("🔑 Gemini API Key", type="password")
         if api_key_input: os.environ["GEMINI_API_KEY"] = api_key_input
 
+    # 수동 초기화 버튼 (필요시)
+    st.write("")
+    if st.button("🔄 추천 순서 리셋"):
+        st.session_state['shown_recipes'] = []
+        st.session_state['ai_recommendation'] = None
+        st.success("처음부터 다시 추천합니다!")
+        st.rerun()
+
 pantry_df = load_data(PANTRY_TAB, ["재료명", "유통기한"])
 recipe_df = load_data(RECIPE_TAB, ["요리명", "필수재료", "링크", "조리법"])
 today = date.today()
@@ -298,24 +284,43 @@ if st.session_state['current_view'] == "요리하기":
     else:
         st.info("💡 AI가 냉장고 속 재료와 대체 가능성을 분석해서 메뉴를 골라줍니다.")
         
-        if st.button("🧑‍🍳 AI! 메뉴 추천해줘", use_container_width=True):
-            with st.spinner("냉장고 스캔 중... (대체 재료 확인 중 🧐)"):
+        # 버튼 텍스트 변경
+        btn_text = "🎲 다음 메뉴 추천해줘!" if st.session_state['shown_recipes'] else "🧑‍🍳 AI! 첫 번째 메뉴 추천해줘"
+        
+        if st.button(btn_text, use_container_width=True):
+            with st.spinner("메뉴 고민 중... 🤔"):
                 key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY"))
                 if key:
                     pantry_list = pantry_df['재료명'].tolist()
                     recipe_list = recipe_df[['요리명', '필수재료', '링크', '조리법']].to_dict('records')
                     
-                    result = get_ai_recommendations(key, pantry_list, recipe_list)
-                    st.session_state['ai_recommendation'] = result.get('recommendations', [])
+                    # 1. 일단 AI에게 물어본다 (제외 목록 포함해서)
+                    result = get_ai_recommendations(key, pantry_list, recipe_list, st.session_state['shown_recipes'])
+                    new_recs = result.get('recommendations', [])
+                    
+                    # 2. [핵심 로직] 만약 AI가 "더 이상 없어요(빈 리스트)"라고 하면?
+                    if not new_recs and st.session_state['shown_recipes']:
+                        st.toast("🔄 모든 가능한 메뉴를 다 보셨네요! 다시 1순위부터 추천합니다.")
+                        # 기록 초기화
+                        st.session_state['shown_recipes'] = []
+                        # 다시 물어본다 (제외 목록 없이)
+                        result = get_ai_recommendations(key, pantry_list, recipe_list, [])
+                        new_recs = result.get('recommendations', [])
+
+                    st.session_state['ai_recommendation'] = new_recs
+                    
+                    # 기록 추가
+                    for r in new_recs:
+                        if r['name'] not in st.session_state['shown_recipes']:
+                            st.session_state['shown_recipes'].append(r['name'])
                 else:
                     st.error("API 키가 없어요!")
 
         if st.session_state['ai_recommendation'] is not None:
             recs = st.session_state['ai_recommendation']
             
-            # 안전장치 덕분에 recs가 절대 빈 배열일 리 없지만, 혹시 모르니 체크
             if len(recs) == 0:
-                st.warning("🥲 (이럴 리가 없는데...) AI가 추천을 포기했나 봅니다.")
+                st.warning("🥲 추천할 메뉴가 없어요. (재료가 너무 부족한가 봐요)")
             else:
                 for rec in recs:
                     with st.expander(f"🍽️ **{rec['name']}** (추천!)", expanded=True):
