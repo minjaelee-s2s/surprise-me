@@ -9,6 +9,7 @@ import json
 from PIL import Image
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+import time # [NEW] 시간 지연을 위해 추가
 
 # --- 구글 시트 설정 ---
 SHEET_NAME = "cooking_db"
@@ -60,7 +61,9 @@ def get_gsheet_client():
     client = gspread.authorize(creds)
     return client
 
-# --- 데이터 로드 ---
+# --- [핵심 수정] 데이터 로드 (캐싱 적용!) ---
+# ttl=10: 10초 동안은 구글 시트에 다시 물어보지 않고 기억해둔 걸 씀 (API 절약)
+@st.cache_data(ttl=10)
 def load_data(tab_name, columns):
     try:
         client = get_gsheet_client()
@@ -71,7 +74,6 @@ def load_data(tab_name, columns):
         if df.empty:
             return pd.DataFrame(columns=columns)
             
-        # 헤더가 없거나 컬럼이 부족할 경우 자동 보정
         for col in columns:
             if col not in df.columns:
                 df[col] = ""
@@ -80,25 +82,24 @@ def load_data(tab_name, columns):
     except Exception as e:
         return pd.DataFrame(columns=columns)
 
-# --- [수정됨] 데이터 저장 (안전한 덮어쓰기) ---
+# --- 데이터 저장 (덮어쓰기) ---
 def save_data_overwrite(df, tab_name):
     try:
         client = get_gsheet_client()
         sheet = client.open(SHEET_NAME).worksheet(tab_name)
         
-        # [핵심 수정] 데이터프레임 복사 후 'NaT'(날짜 없음 오류) 처리
         df_save = df.copy()
-        
-        # 1. 모든 NaN(빈값)을 빈 문자열로 변환
         df_save = df_save.fillna("")
-        
-        # 2. 날짜 컬럼 강제 문자열 변환 (NaT 제거)
         if '유통기한' in df_save.columns:
             df_save['유통기한'] = df_save['유통기한'].apply(lambda x: "" if pd.isna(x) or str(x) == "NaT" else str(x))
 
-        # 시트 초기화 후 업데이트
         sheet.clear() 
         sheet.update([df_save.columns.values.tolist()] + df_save.values.tolist())
+        
+        # [중요] 데이터가 바뀌었으니 캐시를 비워서 새로 읽어오게 함
+        load_data.clear()
+        time.sleep(0.5) # 구글 서버가 쉴 틈을 줌
+        
     except Exception as e:
         st.error(f"저장 실패: {e}")
 
@@ -108,6 +109,11 @@ def add_row_to_sheet(row_data, tab_name):
         client = get_gsheet_client()
         sheet = client.open(SHEET_NAME).worksheet(tab_name)
         sheet.append_row(row_data)
+        
+        # [중요] 데이터가 바뀌었으니 캐시를 비워서 새로 읽어오게 함
+        load_data.clear()
+        time.sleep(0.5) # 연속 입력 시 에러 방지용 딜레이
+        
     except Exception as e:
         st.error(f"추가 실패: {e}")
 
