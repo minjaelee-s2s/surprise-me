@@ -12,7 +12,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import time
 
 # ===============================
-# 🔥 [UPDATED] 재료 분류 및 텍스트 정리 도구
+# 🔥 [UPDATED] 재료 텍스트 청소기 (단위, 설명 제거)
 # ===============================
 
 IGNORABLE_INGREDIENTS = {
@@ -24,40 +24,66 @@ IGNORABLE_INGREDIENTS = {
     "참기름", "들기름", "식용유", "소금", "물", "육수", "치킨스톡", "굴소스"
 }
 
-PORK_EQUIVALENTS = {"목살", "삼겹살", "앞다리살", "뒷다리살", "대패삼겹살", "돼지고기"}
+PORK_EQUIVALENTS = {"목살", "삼겹살", "앞다리살", "뒷다리살", "대패삼겹살", "돼지고기", "다짐육"}
+
+def clean_ingredient_text(text):
+    """
+    '돼지고기 목살 200g(송송 썬 것)' -> '돼지고기 목살'로 변환
+    """
+    text = str(text)
+    # 1. 괄호 안의 내용 제거
+    text = re.sub(r'\(.*?\)', '', text)
+    # 2. 숫자+단위 제거 (200g, 1/3스푼, 1개, 한 바퀴 등)
+    text = re.sub(r'\d+(?:g|kg|ml|L|l|개|스푼|큰술|작은술|컵|마리|모|봉|인분|t|T)?', '', text)
+    text = re.sub(r'\d+/\d+(?:스푼|컵|큰술)?', '', text) # 1/3스푼 같은 분수 형태
+    text = re.sub(r'(?:한|두|세|네|반)\s*(?:바퀴|줌|꼬집|스푼|큰술|컵)', '', text) # 한 바퀴, 반 줌 등
+    # 3. 특수문자 제거 및 공백 정리
+    text = re.sub(r'[^\w\s]', '', text) 
+    return text.strip()
 
 def normalize_pantry(pantry_list):
+    """냉장고 재료 정규화 (돼지고기류 통합)"""
     pantry = set(pantry_list)
     if any(meat in pantry for meat in PORK_EQUIVALENTS):
         pantry.add("돼지고기")
     return pantry
 
-def split_ingredients(ingredient_string):
-    """재료를 Main과 Sub로 분리하고, 리스트로 반환"""
-    ingredients = [x.strip() for x in str(ingredient_string).split(",")]
-    main, sub = [], []
-    for ing in ingredients:
-        if ing in IGNORABLE_INGREDIENTS:
-            sub.append(ing)
-        elif ing in PORK_EQUIVALENTS:
-            main.append("돼지고기")
-        else:
-            main.append(ing)
-    return list(set(main)), sub, ingredients # 전체 리스트도 반환
+def check_is_present(recipe_ing, pantry_set):
+    """
+    레시피 재료가 냉장고에 있는지 확인 (똑똑한 비교)
+    """
+    cleaned_ing = clean_ingredient_text(recipe_ing)
+    
+    # 1. 무시해도 되는 재료면 통과
+    for ignore in IGNORABLE_INGREDIENTS:
+        if ignore in cleaned_ing:
+            return True
+            
+    # 2. 돼지고기류 체크
+    if any(pork in cleaned_ing for pork in PORK_EQUIVALENTS):
+        if "돼지고기" in pantry_set:
+            return True
+            
+    # 3. 일반 재료 체크 (냉장고 재료가 레시피 재료 문자열에 포함되는지)
+    # 예: 냉장고 '김치' -> 레시피 '묵은지 김치' (포함되므로 통과)
+    for p_item in pantry_set:
+        if p_item in cleaned_ing:
+            return True
+            
+    return False
 
 def score_recipe(pantry_set, recipe_row):
-    main, _, _ = split_ingredients(recipe_row["필수재료"])
-    return len(pantry_set & set(main))
+    """점수 계산"""
+    ingredients = [x.strip() for x in str(recipe_row["필수재료"]).split(",")]
+    match_count = 0
+    for ing in ingredients:
+        if check_is_present(ing, pantry_set):
+            match_count += 1
+    return match_count
 
 def format_steps(text):
-    """
-    줄글로 된 레시피를 번호 매겨진 깔끔한 형태로 변환
-    """
     text = str(text).strip()
-    # 이미 번호가 있는 경우 (1. 또는 1)) 줄바꿈만 확실하게
     text = re.sub(r'(\d+[\.\)])', r'\n\1', text)
-    
-    # 번호가 전혀 없는 줄글인 경우, 마침표 기준으로 나눔
     if not re.search(r'\d+[\.\)]', text):
         steps = text.split('.')
         formatted = []
@@ -67,7 +93,6 @@ def format_steps(text):
                 formatted.append(f"{idx}. {step.strip()}.")
                 idx += 1
         return "\n".join(formatted)
-    
     return text
 
 # --- 구글 시트 설정 ---
@@ -174,7 +199,7 @@ def analyze_recipe_image_with_ai(api_key, images):
         except: continue
     return None
 
-# --- AI 메뉴 추천 (파이썬이 재료 분석 -> AI는 멘트만) ---
+# --- AI 메뉴 추천 ---
 def get_ai_recommendations(api_key, pantry_list, recipe_list, excluded_list):
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel("gemini-1.5-flash")
@@ -192,7 +217,7 @@ def get_ai_recommendations(api_key, pantry_list, recipe_list, excluded_list):
             scored.append((r, score))
     scored.sort(key=lambda x: x[1], reverse=True)
 
-    # 3. 추천 대상 없으면 빈 리스트 반환 (리셋 유도)
+    # 3. 추천 대상 없으면 빈 리스트 반환
     if not scored and filtered_recipes:
         scored = [(filtered_recipes[0], 0)]
     elif not scored and not filtered_recipes:
@@ -200,18 +225,14 @@ def get_ai_recommendations(api_key, pantry_list, recipe_list, excluded_list):
 
     top_recipe = scored[0][0]
     
-    # 🔥 [핵심 개선] 파이썬이 '부족한 재료'를 직접 계산! (AI한테 안 물어봄)
-    _, _, all_ingredients = split_ingredients(top_recipe['필수재료'])
+    # 🔥 [수정됨] 부족한 재료 파이썬이 직접 계산 (단위/설명 무시하고 비교)
+    raw_ingredients = [x.strip() for x in str(top_recipe['필수재료']).split(",")]
+    missing_items = []
     
-    # 냉장고에 없는 재료 찾기 (이름 매칭)
-    # 단순화를 위해 정확히 일치하지 않는 것들을 찾음
-    # (고기류는 이미 로직상 통과했으니, 여기서는 표시용으로 단순 비교)
-    missing_items = [
-        ing for ing in all_ingredients 
-        if ing not in pantry_list and ing not in IGNORABLE_INGREDIENTS
-        # 돼지고기류는 냉장고에 고기가 하나라도 있으면 missing 아님 처리
-        and not (ing in PORK_EQUIVALENTS and any(p in PORK_EQUIVALENTS for p in pantry_list))
-    ]
+    for raw_ing in raw_ingredients:
+        # 재료가 없으면 missing에 추가 (Ignorable 및 Pork 로직 통과 여부 확인)
+        if not check_is_present(raw_ing, pantry_set):
+            missing_items.append(raw_ing)
     
     missing_text = ", ".join(missing_items) if missing_items else "없음 (완벽해요!)"
 
@@ -220,7 +241,7 @@ def get_ai_recommendations(api_key, pantry_list, recipe_list, excluded_list):
     너는 긍정적인 요리 친구야.
     
     추천 메뉴: {top_recipe['요리명']}
-    내 상황: {missing_text} 재료가 조금 부족할 수도 있어.
+    부족한 재료: {missing_text}
     
     이 요리를 추천하는 이유를 한 문장으로 긍정적으로 말해줘.
     부족한 재료가 있어도 "괜찮아요, 응용해서 만들면 돼요!"라고 격려해줘.
@@ -239,20 +260,18 @@ def get_ai_recommendations(api_key, pantry_list, recipe_list, excluded_list):
 
     try:
         response = model.generate_content(prompt)
-        # JSON 파싱 강화 (regex로 JSON 블록만 추출)
         match = re.search(r'\{.*\}', response.text, re.DOTALL)
         if match:
-            json_str = match.group(0)
-            return json.loads(json_str)
+            return json.loads(match.group(0))
         else:
-            raise ValueError("No JSON found")
+            raise ValueError("No JSON")
     except:
-        # AI 응답 실패 시, 파이썬이 계산한 정확한 데이터로 대체
+        # [수정됨] 에러 메시지 삭제하고 자연스러운 멘트로 대체
         return {
             "recommendations": [
                 {
                     "name": top_recipe["요리명"],
-                    "reason": "파이썬 분석 결과: 현재 재료로 가장 적합한 메뉴입니다! (AI 응답 지연)",
+                    "reason": "재료 조합상 현재 가장 해먹기 좋은 메뉴입니다! 😋",
                     "missing": missing_text
                 }
             ]
@@ -358,11 +377,9 @@ if st.session_state['current_view'] == "요리하기":
                     pantry_list = pantry_df['재료명'].tolist()
                     recipe_list = recipe_df[['요리명', '필수재료', '링크', '조리법']].to_dict('records')
                     
-                    # 1. 추천 받기
                     result = get_ai_recommendations(key, pantry_list, recipe_list, st.session_state['shown_recipes'])
                     new_recs = result.get('recommendations', [])
                     
-                    # 2. 리셋 로직
                     if not new_recs and st.session_state['shown_recipes']:
                         st.toast("🔄 한 바퀴 다 돌았네요! 처음부터 다시 추천합니다.")
                         st.session_state['shown_recipes'] = []
@@ -387,13 +404,12 @@ if st.session_state['current_view'] == "요리하기":
                     with st.expander(f"🍽️ **{rec['name']}** (추천!)", expanded=True):
                         st.markdown(f"**🗣️ AI 의견:** {rec['reason']}")
                         
-                        # [개선] 부족한 재료를 명확하게 표시
                         missing_info = rec.get('missing', '없음')
-                        if missing_info and missing_info != '없음':
+                        if missing_info and missing_info != '없음 (완벽해요!)':
                              st.markdown(f"""
                             <div style="background-color:#FFF3E0; padding:10px; border-radius:10px; margin-bottom:10px; border:1px solid #FFCC80;">
                                 ⚠️ <b>부족한 재료:</b> {missing_info} <br>
-                                <span style="font-size:0.8em; color:#666;">(파, 양파 등은 없어도 맛낼 수 있어요!)</span>
+                                <span style="font-size:0.8em; color:#666;">(기본 양념이나 부재료는 없어도 괜찮아요!)</span>
                             </div>
                             """, unsafe_allow_html=True)
                         else:
@@ -404,7 +420,6 @@ if st.session_state['current_view'] == "요리하기":
                             original = original_data.iloc[0]
                             st.divider()
                             
-                            # [개선] 레시피 텍스트 포맷팅 (번호 매기기)
                             formatted_steps = format_steps(original['조리법'])
                             st.text(formatted_steps)
                             
@@ -419,7 +434,6 @@ if st.session_state['current_view'] == "요리하기":
 # 뷰 2: 냉장고 관리 & 뷰 3: 레시피 관리 (기존 유지)
 # ==========================================
 elif st.session_state['current_view'] == "냉장고 관리":
-    # (기존 코드와 동일)
     st.header("🧊 우리집 냉장고")
     c1, c2 = st.columns([1.5, 1])
     with c1:
@@ -453,7 +467,6 @@ elif st.session_state['current_view'] == "냉장고 관리":
         st.write(""); st.button("✨ 냉장고에 넣기", use_container_width=True, on_click=handle_add_pantry)
 
 elif st.session_state['current_view'] == "레시피 관리":
-    # (기존 코드와 동일)
     st.header("📖 나만의 레시피북")
     t1, t2 = st.tabs(["➕ 레시피 등록", "📝 목록 보기"])
     with t1:
