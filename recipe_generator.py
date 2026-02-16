@@ -11,6 +11,55 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import time
 
+# ===============================
+# 🔥 [NEW] 추천 엔진용 재료 분류 규칙 (파이썬 로직)
+# ===============================
+
+# 1. 없어도 되는 재료 (향신채, 양념 등)
+IGNORABLE_INGREDIENTS = {
+    "대파", "쪽파", "파", "양파", "마늘", "다진마늘",
+    "청양고추", "고추", "당근", "홍고추",
+    "고춧가루", "후추", "참깨", "깨",
+    "간장", "진간장", "국간장", "고추장", "된장", "쌈장",
+    "설탕", "올리고당", "물엿", "맛술", "미림",
+    "참기름", "들기름", "식용유", "소금", "물", "육수"
+}
+
+# 2. 고기류 통합 (부위 상관없이 '돼지고기'로 퉁침)
+PORK_EQUIVALENTS = {"목살", "삼겹살", "앞다리살", "뒷다리살", "대패삼겹살", "돼지고기"}
+
+def normalize_pantry(pantry_list):
+    """냉장고 재료를 정규화 (예: 삼겹살 있으면 '돼지고기'도 있는 걸로 침)"""
+    pantry = set(pantry_list)
+    # 돼지고기 아류작이 하나라도 있으면 '돼지고기'라는 마스터 키 획득
+    if any(meat in pantry for meat in PORK_EQUIVALENTS):
+        pantry.add("돼지고기")
+    return pantry
+
+def split_ingredients(ingredient_string):
+    """레시피 재료를 메인(Main)과 서브(Sub)로 분리"""
+    ingredients = [x.strip() for x in str(ingredient_string).split(",")]
+    main, sub = [], []
+
+    for ing in ingredients:
+        # 1. 무시해도 되는 재료면 Sub로
+        if ing in IGNORABLE_INGREDIENTS:
+            sub.append(ing)
+        # 2. 돼지고기류면 Main에 넣되 '돼지고기'로 통일
+        elif ing in PORK_EQUIVALENTS:
+            main.append("돼지고기")
+        # 3. 그 외(콩나물, 김치 등)는 Main
+        else:
+            main.append(ing)
+
+    return list(set(main)), sub
+
+def score_recipe(pantry_set, recipe_row):
+    """점수 계산: 메인 재료가 냉장고에 얼마나 있는지 카운트"""
+    main, _ = split_ingredients(recipe_row["필수재료"])
+    # 교집합 개수 반환 (예: 콩불의 Main이 [콩나물, 돼지고기]면 2점)
+    return len(pantry_set & set(main))
+
 # --- 구글 시트 설정 ---
 SHEET_NAME = "cooking_db"
 PANTRY_TAB = "pantry"
@@ -115,58 +164,79 @@ def analyze_recipe_image_with_ai(api_key, images):
         except: continue
     return None
 
-# --- AI 메뉴 추천 (제외 목록 + 강력한 융통성) ---
+# --- [완전 교체] AI 메뉴 추천 (파이썬 로직 기반) ---
 def get_ai_recommendations(api_key, pantry_list, recipe_list, excluded_list):
     genai.configure(api_key=api_key)
-    models = ['gemini-1.5-flash', 'gemini-2.0-flash']
-    
-    exclude_text = ', '.join(excluded_list) if excluded_list else "없음"
+    model = genai.GenerativeModel("gemini-1.5-flash")
 
+    # 1. 내 냉장고 재료 정규화 (돼지고기 통합)
+    pantry_set = normalize_pantry(pantry_list)
+
+    # 2. 이미 본 레시피 제외
+    filtered_recipes = [
+        r for r in recipe_list
+        if r["요리명"] not in excluded_list
+    ]
+
+    # 3. 🔥 Python에서 점수 계산 (AI에게 안 맡김!)
+    scored = []
+    for r in filtered_recipes:
+        score = score_recipe(pantry_set, r)
+        # 메인 재료가 하나라도 맞으면 일단 후보 (점수가 높을수록 좋음)
+        if score > 0:
+            scored.append((r, score))
+
+    # 4. 점수 높은 순 정렬
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    # 5. [안전장치] 만약 매칭되는 게 하나도 없다? -> 그냥 필터된 것 중 아무거나 1개 가져옴
+    if not scored and filtered_recipes:
+        scored = [(filtered_recipes[0], 0)]
+    elif not scored and not filtered_recipes:
+        # 필터링까지 다 거쳤는데 진짜 남은 게 없다 (한 바퀴 돔) -> 빈 리스트 반환 (앱에서 리셋 처리)
+        return {"recommendations": []}
+
+    # 상위 1개만 뽑아서 AI에게 멘트 요청
+    top_recipe = scored[0][0] 
+
+    # 🔥 이제 Gemini는 "판단"이 아니라 "말빨(멘트)"만 생성
     prompt = f"""
-    너는 절대 보수적으로 판단하지 않는 자취생 전용 AI 셰프다.
-    목표는 "완벽한 레시피 재현"이 아니라 "지금 당장 해먹을 수 있는지" 판단하는 것이다.
-
-    냉장고 재료:
-    {', '.join(pantry_list)}
-
-    레시피 목록(JSON):
-    {json.dumps(recipe_list, ensure_ascii=False)}
-
-    ⛔ [제외할 요리 (이미 추천함)]: {exclude_text}
-    위 '제외할 요리'에 있는 메뉴는 절대로 다시 추천하지 마.
-
-    ==========================
-    [🔥 절대 규칙 - 반드시 따를 것 🔥]
-    1. 완벽 일치 금지. 일부가 없어도 요리 가능하면 무조건 추천한다.
-    2. 핵심 재료(고기, 콩나물, 김치 등) 1~2개만 맞으면 통과.
-    3. 대파, 양파, 마늘, 고추, 당근 같은 향신 채소는 없어도 무조건 통과.
-    4. 고기류(목살, 삼겹살, 앞다리살)는 전부 같은 것으로 취급.
-    5. 절대 빈 배열을 반환하지 마라. 애매하면 가장 비슷한 거라도 1개 추천해.
+    너는 긍정적인 자취생 요리 친구다.
     
-    [출력 형식 - 반드시 JSON만 반환]
+    사용자 냉장고: {pantry_list}
+    추천할 요리: {json.dumps(top_recipe, ensure_ascii=False)}
+
+    위 요리를 추천하는 이유를 작성해줘.
+    - 재료가 조금 부족해도 "응용 가능해요!", "없어도 괜찮아요!"라고 긍정적으로 말해.
+    - 특히 파, 양파 같은 부재료가 없어도 절대 안 된다고 하지 마.
+    
+    출력 형식(JSON만 반환):
     {{
       "recommendations": [
         {{
-          "name": "요리명",
-          "reason": "왜 지금 만들 수 있는지 설명",
-          "missing": "없지만 생략 가능한 재료"
+          "name": "{top_recipe['요리명']}",
+          "reason": "긍정적인 추천 멘트",
+          "missing": "없지만 생략 가능한 재료들"
         }}
       ]
     }}
     """
-    
-    for m in models:
-        try:
-            model = genai.GenerativeModel(m)
-            response = model.generate_content(prompt)
-            text = response.text.replace("```json", "").replace("```", "").strip()
-            result = json.loads(text)
-            return result
-        except Exception as e:
-            continue
-            
-    # AI가 모두 실패하면 빈 리스트 반환 (앱에서 처리)
-    return {"recommendations": []}
+
+    try:
+        response = model.generate_content(prompt)
+        text = response.text.replace("```json", "").replace("```", "").strip()
+        return json.loads(text)
+    except:
+        # AI가 멘트 생성 실패해도 추천은 띄움 (파이썬이 골라놨으니까!)
+        return {
+            "recommendations": [
+                {
+                    "name": top_recipe["요리명"],
+                    "reason": "재료 조합상 가장 적절한 메뉴입니다! (AI 응답 지연, 자동 추천)",
+                    "missing": "일부 부재료"
+                }
+            ]
+        }
 
 # --- 콜백 함수 (재료 추가) ---
 def handle_add_pantry():
@@ -213,6 +283,7 @@ if 'highlight_items' not in st.session_state: st.session_state['highlight_items'
 if 'ai_result' not in st.session_state: st.session_state['ai_result'] = {"name": "", "ingredients": "", "steps": ""}
 if 'ai_recommendation' not in st.session_state: st.session_state['ai_recommendation'] = None
 
+# 추천 기록 (새로고침 전까지 유지)
 if 'shown_recipes' not in st.session_state: st.session_state['shown_recipes'] = []
 
 if 'input_name' not in st.session_state: st.session_state['input_name'] = ""
@@ -252,7 +323,7 @@ if not pantry_df.empty: pantry_df['유통기한'] = pd.to_datetime(pantry_df['�
 st.markdown('<div class="main-title">🍳 오늘 뭐 먹지?</div>', unsafe_allow_html=True)
 
 # ==========================================
-# 뷰 1: 요리하기 (AI 뇌 장착!)
+# 뷰 1: 요리하기 (하이브리드 엔진 장착)
 # ==========================================
 if st.session_state['current_view'] == "요리하기":
     st.header("👨‍🍳 AI 셰프의 추천")
@@ -260,22 +331,22 @@ if st.session_state['current_view'] == "요리하기":
     if pantry_df.empty or recipe_df.empty:
          st.warning("냉장고가 비었거나 레시피북이 비어있어요! 데이터를 먼저 채워주세요.")
     else:
-        st.info("💡 AI가 냉장고 속 재료와 대체 가능성을 분석해서 메뉴를 골라줍니다.")
+        st.info("💡 파이썬과 AI가 협동해서 최적의 메뉴를 골라줍니다.")
         
         btn_text = "🎲 다음 메뉴 추천해줘!" if st.session_state['shown_recipes'] else "🧑‍🍳 AI! 첫 번째 메뉴 추천해줘"
         
         if st.button(btn_text, use_container_width=True):
-            with st.spinner("메뉴 고민 중... 🤔"):
+            with st.spinner("메뉴 선정 중... (Python 연산 + AI 멘트 생성 🧐)"):
                 key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY"))
                 if key:
                     pantry_list = pantry_df['재료명'].tolist()
                     recipe_list = recipe_df[['요리명', '필수재료', '링크', '조리법']].to_dict('records')
                     
-                    # 1. AI에게 물어보기
+                    # 1. 추천 받기
                     result = get_ai_recommendations(key, pantry_list, recipe_list, st.session_state['shown_recipes'])
                     new_recs = result.get('recommendations', [])
                     
-                    # 2. [리셋 로직] AI가 비어있다고 하면? (한 바퀴 돔)
+                    # 2. [자동 리셋 로직] 다 떨어졌으면 초기화 후 다시 요청
                     if not new_recs and st.session_state['shown_recipes']:
                         st.toast("🔄 한 바퀴 다 돌았네요! 처음부터 다시 추천합니다.")
                         st.session_state['shown_recipes'] = [] # 리셋
@@ -283,22 +354,9 @@ if st.session_state['current_view'] == "요리하기":
                         result = get_ai_recommendations(key, pantry_list, recipe_list, [])
                         new_recs = result.get('recommendations', [])
 
-                    # 3. [최후의 안전장치] 그래도 비어있다면? (AI 오류 상황) -> 강제로 뽑음
-                    if not new_recs and recipe_list:
-                        # 보여준 적 없는 것 중 하나 선택
-                        candidates = [r for r in recipe_list if r['요리명'] not in st.session_state['shown_recipes']]
-                        if not candidates: candidates = recipe_list # 그래도 없으면 전체 중 랜덤
-                        
-                        picked = random.choice(candidates)
-                        new_recs = [{
-                            "name": picked['요리명'],
-                            "reason": "AI가 너무 고민해서 제가 대신 골라왔어요! (강제 추천 😅)",
-                            "missing": "재료 확인 필요"
-                        }]
-
                     st.session_state['ai_recommendation'] = new_recs
                     
-                    # 본 목록에 추가
+                    # 3. 기록 추가
                     for r in new_recs:
                         if r['name'] not in st.session_state['shown_recipes']:
                             st.session_state['shown_recipes'].append(r['name'])
@@ -309,14 +367,13 @@ if st.session_state['current_view'] == "요리하기":
             recs = st.session_state['ai_recommendation']
             
             if len(recs) == 0:
-                # 3번 안전장치 덕분에 이 메시지는 웬만하면 안 뜰 겁니다.
-                st.warning("🥲 추천할 메뉴가 정말 없어요. (레시피를 더 등록해보세요!)")
+                st.warning("🥲 추천할 메뉴가 정말 없어요. (레시피 데이터가 없는 것 같아요)")
             else:
                 for rec in recs:
                     with st.expander(f"🍽️ **{rec['name']}** (추천!)", expanded=True):
                         st.markdown(f"**🗣️ AI 의견:** {rec['reason']}")
-                        if rec['missing']:
-                            st.caption(f"⚠️ 부족한 재료: {rec['missing']}")
+                        if rec.get('missing'):
+                            st.caption(f"⚠️ 참고: {rec['missing']}")
                         
                         original_data = recipe_df[recipe_df['요리명'] == rec['name']]
                         if not original_data.empty:
