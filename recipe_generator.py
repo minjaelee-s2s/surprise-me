@@ -115,31 +115,78 @@ def analyze_recipe_image_with_ai(api_key, images):
         except: continue
     return None
 
-# --- AI 메뉴 추천 ---
+# --- [수정됨] AI 메뉴 추천 (강력해진 프롬프트 + 안전장치) ---
 def get_ai_recommendations(api_key, pantry_list, recipe_list):
     genai.configure(api_key=api_key)
     models = ['gemini-1.5-flash', 'gemini-2.0-flash']
     
-    # [핵심] 프롬프트: "안 된다고 하지 말고, 되는 이유를 찾아!"
+    # [핵심] 민재 님이 제공한 '절대 규칙' 프롬프트 적용
     prompt = f"""
-    나는 배고픈 자취생이고 냉장고에 다음 재료들이 있어: {', '.join(pantry_list)}
-    
-    내가 가진 레시피북에는 다음 요리들이 있어:
+    너는 절대 보수적으로 판단하지 않는 자취생 전용 AI 셰프다.
+    목표는 "완벽한 레시피 재현"이 아니라 "지금 당장 해먹을 수 있는지" 판단하는 것이다.
+
+    냉장고 재료:
+    {', '.join(pantry_list)}
+
+    레시피 목록(JSON):
     {json.dumps(recipe_list, ensure_ascii=False)}
-    
-    내 냉장고 재료를 보고 가능한 요리를 추천해줘.
-    
-    [판단 규칙 - 너는 아주 관대한 셰프야]
-    1. **핵심 재료 2가지만 있으면 합격!**: 
-       - 예: 콩나물불고기 -> 콩나물 + 돼지고기만 있으면 추천해. (파, 양파 없어도 됨)
-       - 예: 김치찌개 -> 김치 + 돼지고기만 있으면 추천해.
-    2. **서브 야채는 무시해**: 파, 양파, 고추, 당근, 마늘 같은 향신 채소는 없어도 맛은 나니까 **없어도 된다고 판단해.** (절대 이것 때문에 거절하지 마)
-    3. **양념은 무조건 있음**: 소금, 설탕, 간장, 고추장, 참기름 등은 집에 다 있다고 가정해.
-    4. **고기 대체**: 목살, 삼겹살, 앞다리살, 대패삼겹살 -> 전부 '돼지고기'로 퉁쳐서 합격시켜.
-    
-    [응답 형식]
-    JSON 리스트만 반환.
-    형식: {{ "recommendations": [ {{ "name": "요리명", "reason": "추천 멘트(예: 파는 없지만 고기랑 콩나물이 완벽해요!)", "missing": "없지만 생략 가능한 재료" }} ] }}
+
+    ==========================
+    [🔥 절대 규칙 - 반드시 따를 것 🔥]
+
+    1. 완벽 일치 금지.
+       → 레시피 재료가 100% 없어도 된다.
+       → 일부가 없어도 요리 가능하면 무조건 추천한다.
+
+    2. 핵심 재료 1~2개만 맞으면 통과.
+       → 예: 콩나물불고기 = 콩나물 + 돼지고기 계열만 있으면 무조건 추천.
+       → 예: 김치찌개 = 김치만 있어도 추천.
+
+    3. 다음 재료는 "존재하지 않아도 자동 통과":
+       - 대파
+       - 쪽파
+       - 양파
+       - 마늘
+       - 청양고추
+       - 고추
+       - 당근
+       - 깨
+       - 고춧가루
+       - 후추
+       - 참기름
+       - 식용유
+       - 소금
+       - 설탕
+       - 간장
+       - 고추장
+       - 맛술
+       - 물엿
+
+    4. 고기류는 전부 같은 것으로 취급:
+       - 목살 = 삼겹살 = 앞다리살 = 대패삼겹살 = 돼지고기
+       → 하나라도 있으면 돼지고기 요리는 전부 가능 처리
+
+    5. "조금 부족하지만 만들 수 있음"은 무조건 가능으로 판정.
+
+    6. 절대 빈 배열을 반환하지 마라.
+       → 추천할 게 애매하면 가장 비슷한 요리라도 1개는 반드시 추천해라.
+       → recommendations는 최소 1개 이상이어야 한다.
+
+    7. missing 필드에는 "없지만 생략 가능"한 재료만 적는다.
+       → 없다고 탈락시키지 마라.
+
+    ==========================
+
+    [출력 형식 - 반드시 JSON만 반환]
+    {{
+      "recommendations": [
+        {{
+          "name": "요리명",
+          "reason": "왜 지금 만들 수 있는지 설명",
+          "missing": "없지만 생략 가능한 재료"
+        }}
+      ]
+    }}
     """
     
     for m in models:
@@ -147,11 +194,24 @@ def get_ai_recommendations(api_key, pantry_list, recipe_list):
             model = genai.GenerativeModel(m)
             response = model.generate_content(prompt)
             text = response.text.replace("```json", "").replace("```", "").strip()
-            return json.loads(text)
+            result = json.loads(text)
+            
+            # AI가 빈 리스트를 줬을 경우를 대비해 에러 발생시켜서 아래 except로 보냄
+            if not result.get("recommendations"):
+                raise ValueError("Empty recommendations from AI")
+                
+            return result
         except Exception as e:
             continue
             
-    return {"recommendations": []}
+    # [안전장치] AI가 다 실패하거나 빈 배열을 주면, 강제로 첫 번째 레시피 추천
+    fallback_rec = {
+        # recipe_list의 첫번째 요리명을 가져옴 (없으면 기본 텍스트)
+        "name": recipe_list[0]['요리명'] if recipe_list else "추천 요리 없음",
+        "reason": "재료가 조금 부족해도 응용해서 만들 수 있어요! (AI가 엄격해서 제가 강제로 추천합니다 😅)",
+        "missing": "일부 부재료"
+    }
+    return {"recommendations": [fallback_rec]}
 
 # --- 콜백 함수 (재료 추가) ---
 def handle_add_pantry():
@@ -253,8 +313,9 @@ if st.session_state['current_view'] == "요리하기":
         if st.session_state['ai_recommendation'] is not None:
             recs = st.session_state['ai_recommendation']
             
+            # 안전장치 덕분에 recs가 절대 빈 배열일 리 없지만, 혹시 모르니 체크
             if len(recs) == 0:
-                st.warning("🥲 AI가 또 없다고 하네요... (프롬프트가 아직도 엄격한가 봅니다 ㅠㅠ) 재료 이름을 정확히 입력했는지 확인해주세요!")
+                st.warning("🥲 (이럴 리가 없는데...) AI가 추천을 포기했나 봅니다.")
             else:
                 for rec in recs:
                     with st.expander(f"🍽️ **{rec['name']}** (추천!)", expanded=True):
