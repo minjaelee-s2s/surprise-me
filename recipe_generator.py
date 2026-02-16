@@ -11,7 +11,6 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # --- 구글 시트 설정 ---
-# 시트 이름과 워크시트(탭) 이름이 정확해야 합니다!
 SHEET_NAME = "cooking_db"
 PANTRY_TAB = "pantry"
 RECIPE_TAB = "recipes"
@@ -19,7 +18,7 @@ RECIPE_TAB = "recipes"
 # --- 단위 변환 설정 (계란 1판 = 18개) ---
 UNIT_MAP = {"판": 18, "다발": 10, "봉": 1, "개": 1, "인분": 1}
 
-# --- [스타일] 귀염 & 깔끔 테마 (반응형 적용) ---
+# --- [스타일] 귀염 & 깔끔 테마 ---
 def apply_cute_style():
     st.markdown("""
         <style>
@@ -56,36 +55,41 @@ def apply_cute_style():
 # --- 구글 시트 연결 함수 ---
 def get_gsheet_client():
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    # Streamlit Secrets에서 로봇 키 가져오기
     creds_dict = dict(st.secrets["gcp_service_account"])
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     client = gspread.authorize(creds)
     return client
 
-# --- 데이터 로드 (구글 시트 -> DataFrame) ---
+# --- 데이터 로드 ---
 def load_data(tab_name, columns):
     try:
         client = get_gsheet_client()
         sheet = client.open(SHEET_NAME).worksheet(tab_name)
         data = sheet.get_all_records()
         df = pd.DataFrame(data)
-        # 데이터가 비어있어도 컬럼은 유지
         if df.empty: return pd.DataFrame(columns=columns)
         return df
     except Exception as e:
-        # st.error(f"데이터 로드 실패: {e}") # 디버깅용
         return pd.DataFrame(columns=columns)
 
-# --- 데이터 저장 (DataFrame -> 구글 시트) ---
-def save_data(df, tab_name):
+# --- 데이터 저장 (수정/삭제용 - 덮어쓰기) ---
+def save_data_overwrite(df, tab_name):
     try:
         client = get_gsheet_client()
         sheet = client.open(SHEET_NAME).worksheet(tab_name)
-        sheet.clear() # 싹 지우고
-        # 헤더 포함해서 다시 쓰기
+        sheet.clear() 
         sheet.update([df.columns.values.tolist()] + df.values.tolist())
     except Exception as e:
         st.error(f"저장 실패: {e}")
+
+# --- 데이터 추가 (추가용 - 안전하게 한 줄 붙이기) ---
+def add_row_to_sheet(row_data, tab_name):
+    try:
+        client = get_gsheet_client()
+        sheet = client.open(SHEET_NAME).worksheet(tab_name)
+        sheet.append_row(row_data)
+    except Exception as e:
+        st.error(f"추가 실패: {e}")
 
 def parse_quantity(text_qty):
     if not text_qty or str(text_qty).strip() == "": return 1
@@ -119,6 +123,12 @@ def analyze_recipe_image_with_ai(api_key, images):
 st.set_page_config(page_title="오늘 뭐 먹지?", page_icon="🍳", layout="wide") 
 apply_cute_style() 
 
+# [NEW] 토스트 메시지 처리 (새로고침 후에도 메시지가 뜨도록 세션 상태 활용)
+if 'toast_msg' not in st.session_state: st.session_state['toast_msg'] = None
+if st.session_state['toast_msg']:
+    st.toast(st.session_state['toast_msg'], icon="✅") # 화면에 알림 띄우기
+    st.session_state['toast_msg'] = None # 알림 띄웠으니 초기화
+
 if 'current_view' not in st.session_state: st.session_state['current_view'] = '요리하기'
 if 'highlight_items' not in st.session_state: st.session_state['highlight_items'] = []
 if 'ai_result' not in st.session_state: st.session_state['ai_result'] = {"name": "", "ingredients": "", "steps": ""}
@@ -144,20 +154,15 @@ with st.sidebar:
         api_key_input = st.text_input("🔑 Gemini API Key", type="password")
         if api_key_input: os.environ["GEMINI_API_KEY"] = api_key_input
 
-# --- 데이터 불러오기 (구글 시트에서) ---
-# 기존 파일 로드 대신 load_data 함수 사용
+# --- 데이터 불러오기 ---
 pantry_df = load_data(PANTRY_TAB, ["재료명", "수량", "유통기한"])
 recipe_df = load_data(RECIPE_TAB, ["요리명", "필수재료", "링크", "조리법"])
-
 today = date.today()
 
-# 날짜/수량 데이터 전처리
 if not pantry_df.empty:
-    # 빈 문자열이나 None 처리
     pantry_df['유통기한'] = pd.to_datetime(pantry_df['유통기한'], errors='coerce').dt.date
     pantry_df['수량'] = pd.to_numeric(pantry_df['수량'], errors='coerce').fillna(1).astype(int)
 
-# 메인 타이틀
 st.markdown('<div class="main-title">🍳 오늘 뭐 먹지?</div>', unsafe_allow_html=True)
 
 # ==========================================
@@ -210,19 +215,13 @@ elif st.session_state['current_view'] == "냉장고 관리":
         if not pantry_df.empty:
             for idx, row in pantry_df.iterrows():
                 icon = "🔴" if row['재료명'] in st.session_state['highlight_items'] else "🟢"
-                
-                # 유통기한 처리 (None/NaT 체크)
-                if pd.isna(row['유통기한']): 
-                    d_day_str = "(소스/조미료)"
-                    display_style = "color:#8D6E63;" 
+                if pd.isna(row['유통기한']): d_day_str = "(소스/조미료)"; display_style = "color:#8D6E63;" 
                 else:
                     try:
                         d_day = (row['유통기한'] - today).days
                         d_day_str = f"({d_day}일 남음)" if d_day >= 0 else "(지남!!)"
                         display_style = "color:#FF7043;" if d_day < 3 else "color:#8D6E63;"
-                    except: # 날짜 형식이 잘못된 경우 대비
-                         d_day_str = "(날짜 오류)"
-                         display_style = "color:gray;"
+                    except: d_day_str = ""; display_style = ""
 
                 with st.container(border=True):
                     sc1, sc2, sc3, sc4 = st.columns([3, 1, 1, 1])
@@ -231,15 +230,15 @@ elif st.session_state['current_view'] == "냉장고 관리":
                     with sc2: 
                         if st.button("➕", key=f"p{idx}"): 
                             pantry_df.at[idx, '수량'] += 1
-                            save_data(pantry_df, PANTRY_TAB); st.rerun()
+                            save_data_overwrite(pantry_df, PANTRY_TAB); st.rerun()
                     with sc3: 
                         if st.button("➖", key=f"m{idx}"):
                              if pantry_df.at[idx, '수량'] > 0: pantry_df.at[idx, '수량'] -= 1
-                             save_data(pantry_df, PANTRY_TAB); st.rerun()
+                             save_data_overwrite(pantry_df, PANTRY_TAB); st.rerun()
                     with sc4: 
                         if st.button("🗑️", key=f"d{idx}"): 
                             pantry_df = pantry_df.drop(idx)
-                            save_data(pantry_df, PANTRY_TAB); st.rerun()
+                            save_data_overwrite(pantry_df, PANTRY_TAB); st.rerun()
 
     with c2:
         st.subheader("🛒 재료 채우기")
@@ -256,12 +255,13 @@ elif st.session_state['current_view'] == "냉장고 관리":
             st.write("") 
             if st.form_submit_button("✨ 냉장고에 넣기", use_container_width=True):
                 if n:
-                    if is_sauce or is_seasoning: final_q = 1; final_d = "" # 구글 시트엔 빈칸("")으로 저장
-                    else: final_q = parse_quantity(q); final_d = str(d) # 날짜를 문자열로 저장
+                    if is_sauce or is_seasoning: final_q = 1; final_d = "" 
+                    else: final_q = parse_quantity(q); final_d = str(d)
                     
-                    new_row = pd.DataFrame({"재료명": [n], "수량": [final_q], "유통기한": [final_d]})
-                    pantry_df = pd.concat([pantry_df, new_row], ignore_index=True)
-                    save_data(pantry_df, PANTRY_TAB); st.rerun()
+                    add_row_to_sheet([n, final_q, final_d], PANTRY_TAB)
+                    # [NEW] 저장 성공 메시지 설정
+                    st.session_state['toast_msg'] = f"🧊 '{n}' 저장 완료! 냉장고로 슝~"
+                    st.rerun()
                 else: st.warning("재료 이름은 꼭 적어주세요! 🥺")
 
 # ==========================================
@@ -293,15 +293,22 @@ elif st.session_state['current_view'] == "레시피 관리":
             rl = st.text_input("참고 링크 (선택)")
             st.write("")
             if st.form_submit_button("✨ 레시피북에 저장", use_container_width=True):
-                new_rec = pd.DataFrame({"요리명": [rn], "필수재료": [ri], "링크": [rl], "조리법": [rs]})
-                recipe_df = pd.concat([recipe_df, new_rec], ignore_index=True)
-                save_data(recipe_df, RECIPE_TAB)
+                add_row_to_sheet([rn, ri, rl, rs], RECIPE_TAB)
                 st.session_state['ai_result'] = {}
-                st.success("저장 완료! 맛있게 해드세요 😋"); st.rerun()
+                # [NEW] 저장 성공 메시지 설정
+                st.session_state['toast_msg'] = f"📖 '{rn}' 레시피북에 저장 완료!"
+                st.rerun()
     with t2:
         if not recipe_df.empty:
             edited_df = st.data_editor(recipe_df, num_rows="dynamic", use_container_width=True, key="recipe_editor", column_config={"링크": st.column_config.LinkColumn("링크"), "조리법": st.column_config.TextColumn("조리법", width="large")})
             st.write("")
             if st.button("💾 변경사항 저장하기", use_container_width=True):
+                # 1. 빈 줄 제거
                 clean_df = edited_df[edited_df['요리명'].notna() & (edited_df['요리명'] != "")]
-                save_data(clean_df, RECIPE_TAB); st.success("저장되었어요! (빈 줄은 삭제됨)"); st.rerun()
+                # 2. 중복 제거
+                deduplicated_df = clean_df.drop_duplicates(subset=['요리명', '링크'], keep='first')
+                
+                # 3. 저장
+                save_data_overwrite(deduplicated_df, RECIPE_TAB)
+                st.session_state['toast_msg'] = "💾 변경사항 저장 완료! (중복도 정리했어요)"
+                st.rerun()
