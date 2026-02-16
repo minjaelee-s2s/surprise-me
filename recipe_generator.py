@@ -102,23 +102,27 @@ def add_row_to_sheet(row_data, tab_name):
 # --- AI 이미지 분석 (레시피 등록용) ---
 def analyze_recipe_image_with_ai(api_key, images):
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-2.0-flash') # 모델명 통일
+    # 여러 모델 시도
+    models = ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro']
     prompt = """
     이 음식 사진들을 분석해서 [요리 이름], [필수 재료], [조리법]을 추출해 JSON으로 반환해.
     형식: {"name": "...", "ingredients": "재료1, 재료2", "steps": "..."}
     """
-    try:
-        response = model.generate_content([prompt] + images)
-        return json.loads(response.text.replace("```json", "").replace("```", ""))
-    except: return None
+    for m in models:
+        try:
+            model = genai.GenerativeModel(m)
+            response = model.generate_content([prompt] + images)
+            return json.loads(response.text.replace("```json", "").replace("```", ""))
+        except: continue
+    return None
 
-# --- [NEW] AI 메뉴 추천 (지능형 판단) ---
-# 여기가 핵심입니다! 단순 매칭 대신 AI에게 물어봅니다.
+# --- [수정됨] AI 메뉴 추천 (지능형 판단) ---
 def get_ai_recommendations(api_key, pantry_list, recipe_list):
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-2.0-flash')
+    # 모델 안정성을 위해 1.5 flash 우선 사용
+    models = ['gemini-1.5-flash', 'gemini-2.0-flash']
     
-    # AI에게 보낼 프롬프트
+    # [핵심 수정] f-string 내부의 중괄호를 {{ }}로 이스케이프 처리!
     prompt = f"""
     나는 자취생이고 냉장고에 다음 재료들이 있어: {', '.join(pantry_list)}
     
@@ -129,17 +133,24 @@ def get_ai_recommendations(api_key, pantry_list, recipe_list):
     
     [규칙]
     1. 재료 이름이 정확히 같지 않아도, 대체 가능하다면(예: 진간장->양조간장, 알배기배추->배추) 가능하다고 판단해.
-    2. 소금, 후추, 식용유, 물 같은 기본 양념이 없어도 있다고 가정해.
+    2. 소금, 후추, 식용유, 물, 깨 같은 기본 양념은 냉장고에 없어도 있다고 가정해.
     3. 핵심 재료(고기, 메인 채소)가 없다면 추천하지 마.
-    4. 결과는 JSON 리스트로 줘. {"recommendations": [{"name": "요리명", "reason": "추천 이유(대체 재료 설명 등)", "missing": "부족한 재료"}]}
-    5. 추천할 게 없으면 빈 리스트 []를 반환해.
+    4. 결과는 반드시 JSON 리스트로 줘. 
+    형식 예시: {{ "recommendations": [ {{ "name": "요리명", "reason": "추천 이유", "missing": "부족한 재료" }} ] }}
+    5. 추천할 게 없으면 {{ "recommendations": [] }} 를 반환해.
     """
     
-    try:
-        response = model.generate_content(prompt)
-        return json.loads(response.text.replace("```json", "").replace("```", ""))
-    except Exception as e:
-        return {"recommendations": []}
+    for m in models:
+        try:
+            model = genai.GenerativeModel(m)
+            response = model.generate_content(prompt)
+            # JSON 파싱 시도
+            text = response.text.replace("```json", "").replace("```", "").strip()
+            return json.loads(text)
+        except Exception as e:
+            continue # 다음 모델 시도
+            
+    return {"recommendations": []}
 
 # --- 콜백 함수 (재료 추가) ---
 def handle_add_pantry():
@@ -151,7 +162,6 @@ def handle_add_pantry():
     if n:
         final_d = "" if (is_sauce or is_seasoning) else str(d)
         
-        # 중복 방지 로직
         current_df = load_data(PANTRY_TAB, ["재료명", "유통기한"])
         if n in current_df['재료명'].values:
             current_df.loc[current_df['재료명'] == n, '유통기한'] = final_d
@@ -185,7 +195,7 @@ if st.session_state['warning_msg']:
 if 'current_view' not in st.session_state: st.session_state['current_view'] = '요리하기'
 if 'highlight_items' not in st.session_state: st.session_state['highlight_items'] = []
 if 'ai_result' not in st.session_state: st.session_state['ai_result'] = {"name": "", "ingredients": "", "steps": ""}
-if 'ai_recommendation' not in st.session_state: st.session_state['ai_recommendation'] = None # 추천 결과 저장용
+if 'ai_recommendation' not in st.session_state: st.session_state['ai_recommendation'] = None
 
 if 'input_name' not in st.session_state: st.session_state['input_name'] = ""
 if 'input_date' not in st.session_state: st.session_state['input_date'] = date.today() + timedelta(days=7)
@@ -227,13 +237,11 @@ if st.session_state['current_view'] == "요리하기":
     else:
         st.info("💡 AI가 냉장고 속 재료와 대체 가능성을 분석해서 메뉴를 골라줍니다.")
         
-        # 분석 버튼 (API 비용 절약을 위해 버튼 누를 때만 실행)
         if st.button("🧑‍🍳 AI! 메뉴 추천해줘", use_container_width=True):
             with st.spinner("냉장고 스캔 중... (대체 재료 확인 중 🧐)"):
                 key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY"))
                 if key:
                     pantry_list = pantry_df['재료명'].tolist()
-                    # 레시피 데이터프레임을 리스트로 변환 (AI에게 보내기 위해)
                     recipe_list = recipe_df[['요리명', '필수재료', '링크', '조리법']].to_dict('records')
                     
                     result = get_ai_recommendations(key, pantry_list, recipe_list)
@@ -241,7 +249,6 @@ if st.session_state['current_view'] == "요리하기":
                 else:
                     st.error("API 키가 없어요!")
 
-        # 결과 표시
         if st.session_state['ai_recommendation']:
             recs = st.session_state['ai_recommendation']
             if len(recs) == 0:
@@ -253,16 +260,17 @@ if st.session_state['current_view'] == "요리하기":
                         if rec['missing']:
                             st.caption(f"⚠️ 부족한 재료: {rec['missing']}")
                         
-                        # 원본 레시피 정보 찾기
-                        original = recipe_df[recipe_df['요리명'] == rec['name']].iloc[0]
-                        st.divider()
-                        st.text(str(original['조리법']).replace("\\n", "\n"))
-                        if original['링크']: st.markdown(f"👉 [레시피 링크]({original['링크']})")
-                        
-                        if st.button(f"😋 {rec['name']} 요리 완료! (재료 소진)", key=f"cook_{rec['name']}"):
-                             st.session_state['highlight_items'] = [x.strip() for x in str(original['필수재료']).split(',')]
-                             st.session_state['current_view'] = "냉장고 관리"
-                             st.rerun()
+                        original_data = recipe_df[recipe_df['요리명'] == rec['name']]
+                        if not original_data.empty:
+                            original = original_data.iloc[0]
+                            st.divider()
+                            st.text(str(original['조리법']).replace("\\n", "\n"))
+                            if original['링크']: st.markdown(f"👉 [레시피 링크]({original['링크']})")
+                            
+                            if st.button(f"😋 {rec['name']} 요리 완료! (재료 소진)", key=f"cook_{rec['name']}"):
+                                 st.session_state['highlight_items'] = [x.strip() for x in str(original['필수재료']).split(',')]
+                                 st.session_state['current_view'] = "냉장고 관리"
+                                 st.rerun()
 
 # ==========================================
 # 뷰 2: 냉장고 관리
