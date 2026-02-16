@@ -134,16 +134,15 @@ def analyze_recipe_image_with_ai(api_key, images):
 # --- 콜백 함수들 ---
 def handle_add_pantry():
     n = st.session_state.get('input_name', "")
-    # 수량(q) 삭제됨
     d = st.session_state.get('input_date', date.today())
     is_sauce = st.session_state.get('chk_sauce', False)
     is_seasoning = st.session_state.get('chk_season', False)
 
     if n:
-        if is_sauce or is_seasoning: final_d = "" # 소스/조미료는 날짜 없음
+        if is_sauce or is_seasoning: final_d = "" 
         else: final_d = str(d)
         
-        # [수정됨] 이름과 날짜만 저장
+        # [수정됨] 수량 없이 이름과 날짜만 저장
         add_row_to_sheet([n, final_d], PANTRY_TAB)
         st.session_state['toast_msg'] = f"🧊 '{n}' 저장 완료! 냉장고로 슝~"
         
@@ -197,7 +196,7 @@ with st.sidebar:
         api_key_input = st.text_input("🔑 Gemini API Key", type="password")
         if api_key_input: os.environ["GEMINI_API_KEY"] = api_key_input
 
-# [수정됨] 수량 컬럼 제거
+# [수정됨] 로드할 컬럼에서 '수량' 제거
 pantry_df = load_data(PANTRY_TAB, ["재료명", "유통기한"])
 recipe_df = load_data(RECIPE_TAB, ["요리명", "필수재료", "링크", "조리법"])
 today = date.today()
@@ -266,12 +265,11 @@ elif st.session_state['current_view'] == "냉장고 관리":
                     except: d_day_str = ""; display_style = ""
 
                 with st.container(border=True):
-                    # [수정됨] 수량 표시 제거 및 레이아웃 단순화
-                    sc1, sc2, sc3 = st.columns([3, 2, 1])
-                    sc1.markdown(f"**{icon} {row['재료명']}**")
-                    sc2.markdown(f"<span style='{display_style} font-size:0.9em'>{d_day_str}</span>", unsafe_allow_html=True)
+                    # [수정됨] 화면 비율 조정 (이름영역 넓게, 삭제버튼 작게)
+                    sc1, sc2 = st.columns([5, 1])
+                    sc1.markdown(f"**{icon} {row['재료명']}** <span style='{display_style} font-size:0.9em; margin-left:10px;'>{d_day_str}</span>", unsafe_allow_html=True)
                     
-                    with sc3: 
+                    with sc2: 
                         if st.button("🗑️", key=f"d{idx}"): 
                             pantry_df = pantry_df.drop(idx)
                             save_data_overwrite(pantry_df, PANTRY_TAB); st.rerun()
@@ -292,7 +290,7 @@ elif st.session_state['current_view'] == "냉장고 관리":
         with chk_col1: st.checkbox("🥫 소스", key="chk_sauce")
         with chk_col2: st.checkbox("🧂 조미료", key="chk_season")
         
-        # [수정됨] 수량 입력창 제거
+        # [수정됨] 수량 입력창 완전 삭제
         st.date_input("유통기한", key="input_date")
         
         st.write("") 
