@@ -67,21 +67,42 @@ def load_data(tab_name, columns):
         sheet = client.open(SHEET_NAME).worksheet(tab_name)
         data = sheet.get_all_records()
         df = pd.DataFrame(data)
-        if df.empty: return pd.DataFrame(columns=columns)
-        return df
+        
+        if df.empty:
+            return pd.DataFrame(columns=columns)
+            
+        # 헤더가 없거나 컬럼이 부족할 경우 자동 보정
+        for col in columns:
+            if col not in df.columns:
+                df[col] = ""
+                
+        return df[columns]
     except Exception as e:
         return pd.DataFrame(columns=columns)
 
-# --- 데이터 저장/추가 함수들 ---
+# --- [수정됨] 데이터 저장 (안전한 덮어쓰기) ---
 def save_data_overwrite(df, tab_name):
     try:
         client = get_gsheet_client()
         sheet = client.open(SHEET_NAME).worksheet(tab_name)
+        
+        # [핵심 수정] 데이터프레임 복사 후 'NaT'(날짜 없음 오류) 처리
+        df_save = df.copy()
+        
+        # 1. 모든 NaN(빈값)을 빈 문자열로 변환
+        df_save = df_save.fillna("")
+        
+        # 2. 날짜 컬럼 강제 문자열 변환 (NaT 제거)
+        if '유통기한' in df_save.columns:
+            df_save['유통기한'] = df_save['유통기한'].apply(lambda x: "" if pd.isna(x) or str(x) == "NaT" else str(x))
+
+        # 시트 초기화 후 업데이트
         sheet.clear() 
-        sheet.update([df.columns.values.tolist()] + df.values.tolist())
+        sheet.update([df_save.columns.values.tolist()] + df_save.values.tolist())
     except Exception as e:
         st.error(f"저장 실패: {e}")
 
+# --- 데이터 추가 ---
 def add_row_to_sheet(row_data, tab_name):
     try:
         client = get_gsheet_client()
@@ -118,9 +139,8 @@ def analyze_recipe_image_with_ai(api_key, images):
     st.error("❌ 분석 실패. API 키 확인 필요.")
     return None
 
-# --- [NEW] 저장 버튼 클릭 시 실행될 콜백 함수들 ---
+# --- 콜백 함수들 ---
 def handle_add_pantry():
-    # 세션 상태에서 값 가져오기
     n = st.session_state.get('input_name', "")
     q = st.session_state.get('input_qty', "")
     d = st.session_state.get('input_date', date.today())
@@ -134,7 +154,6 @@ def handle_add_pantry():
         add_row_to_sheet([n, final_q, final_d], PANTRY_TAB)
         st.session_state['toast_msg'] = f"🧊 '{n}' 저장 완료! 냉장고로 슝~"
         
-        # 여기서 초기화 (이건 가능함!)
         st.session_state['input_name'] = ""
         st.session_state['input_qty'] = ""
         st.session_state['input_date'] = date.today() + timedelta(days=7)
@@ -144,9 +163,6 @@ def handle_add_pantry():
         st.session_state['warning_msg'] = "재료 이름은 꼭 적어주세요! 🥺"
 
 def handle_add_recipe():
-    # 세션 상태가 아니라 form submit은 콜백 없이 처리 가능하지만 일관성을 위해 유지하거나
-    # form은 기존 방식대로 하되, 에러가 안 나는 구조로 둠.
-    # 레시피 쪽은 form_submit_button이라 기존 코드도 문제 없음.
     pass
 
 # --- 앱 초기 설정 ---
@@ -296,7 +312,6 @@ elif st.session_state['current_view'] == "냉장고 관리":
         with col_d: st.date_input("유통기한", key="input_date")
         
         st.write("") 
-        # [수정됨] 여기 on_click으로 콜백 함수 연결!
         st.button("✨ 냉장고에 넣기", use_container_width=True, on_click=handle_add_pantry)
 
 # ==========================================
