@@ -9,15 +9,12 @@ import json
 from PIL import Image
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-import time # [NEW] 시간 지연을 위해 추가
+import time
 
 # --- 구글 시트 설정 ---
 SHEET_NAME = "cooking_db"
 PANTRY_TAB = "pantry"
 RECIPE_TAB = "recipes"
-
-# --- 단위 변환 설정 (계란 1판 = 18개) ---
-UNIT_MAP = {"판": 18, "다발": 10, "봉": 1, "개": 1, "인분": 1}
 
 # --- [스타일] 귀염 & 깔끔 테마 ---
 def apply_cute_style():
@@ -61,8 +58,7 @@ def get_gsheet_client():
     client = gspread.authorize(creds)
     return client
 
-# --- [핵심 수정] 데이터 로드 (캐싱 적용!) ---
-# ttl=10: 10초 동안은 구글 시트에 다시 물어보지 않고 기억해둔 걸 씀 (API 절약)
+# --- 데이터 로드 (캐싱 적용) ---
 @st.cache_data(ttl=10)
 def load_data(tab_name, columns):
     try:
@@ -96,9 +92,8 @@ def save_data_overwrite(df, tab_name):
         sheet.clear() 
         sheet.update([df_save.columns.values.tolist()] + df_save.values.tolist())
         
-        # [중요] 데이터가 바뀌었으니 캐시를 비워서 새로 읽어오게 함
         load_data.clear()
-        time.sleep(0.5) # 구글 서버가 쉴 틈을 줌
+        time.sleep(0.5) 
         
     except Exception as e:
         st.error(f"저장 실패: {e}")
@@ -110,20 +105,11 @@ def add_row_to_sheet(row_data, tab_name):
         sheet = client.open(SHEET_NAME).worksheet(tab_name)
         sheet.append_row(row_data)
         
-        # [중요] 데이터가 바뀌었으니 캐시를 비워서 새로 읽어오게 함
         load_data.clear()
-        time.sleep(0.5) # 연속 입력 시 에러 방지용 딜레이
+        time.sleep(0.5)
         
     except Exception as e:
         st.error(f"추가 실패: {e}")
-
-def parse_quantity(text_qty):
-    if not text_qty or str(text_qty).strip() == "": return 1
-    numbers = re.findall(r'\d+', str(text_qty))
-    number = int(numbers[0]) if numbers else 1
-    for unit, value in UNIT_MAP.items():
-        if unit in str(text_qty): return number * value
-    return int(text_qty) if str(text_qty).isdigit() else number
 
 # --- AI 이미지 분석 함수 ---
 def analyze_recipe_image_with_ai(api_key, images):
@@ -148,20 +134,20 @@ def analyze_recipe_image_with_ai(api_key, images):
 # --- 콜백 함수들 ---
 def handle_add_pantry():
     n = st.session_state.get('input_name', "")
-    q = st.session_state.get('input_qty', "")
+    # 수량(q) 삭제됨
     d = st.session_state.get('input_date', date.today())
     is_sauce = st.session_state.get('chk_sauce', False)
     is_seasoning = st.session_state.get('chk_season', False)
 
     if n:
-        if is_sauce or is_seasoning: final_q = 1; final_d = "" 
-        else: final_q = parse_quantity(q); final_d = str(d)
+        if is_sauce or is_seasoning: final_d = "" # 소스/조미료는 날짜 없음
+        else: final_d = str(d)
         
-        add_row_to_sheet([n, final_q, final_d], PANTRY_TAB)
+        # [수정됨] 이름과 날짜만 저장
+        add_row_to_sheet([n, final_d], PANTRY_TAB)
         st.session_state['toast_msg'] = f"🧊 '{n}' 저장 완료! 냉장고로 슝~"
         
         st.session_state['input_name'] = ""
-        st.session_state['input_qty'] = ""
         st.session_state['input_date'] = date.today() + timedelta(days=7)
         st.session_state['chk_sauce'] = False
         st.session_state['chk_season'] = False
@@ -190,7 +176,6 @@ if 'highlight_items' not in st.session_state: st.session_state['highlight_items'
 if 'ai_result' not in st.session_state: st.session_state['ai_result'] = {"name": "", "ingredients": "", "steps": ""}
 
 if 'input_name' not in st.session_state: st.session_state['input_name'] = ""
-if 'input_qty' not in st.session_state: st.session_state['input_qty'] = ""
 if 'input_date' not in st.session_state: st.session_state['input_date'] = date.today() + timedelta(days=7)
 
 # --- 사이드바 ---
@@ -212,13 +197,13 @@ with st.sidebar:
         api_key_input = st.text_input("🔑 Gemini API Key", type="password")
         if api_key_input: os.environ["GEMINI_API_KEY"] = api_key_input
 
-pantry_df = load_data(PANTRY_TAB, ["재료명", "수량", "유통기한"])
+# [수정됨] 수량 컬럼 제거
+pantry_df = load_data(PANTRY_TAB, ["재료명", "유통기한"])
 recipe_df = load_data(RECIPE_TAB, ["요리명", "필수재료", "링크", "조리법"])
 today = date.today()
 
 if not pantry_df.empty:
     pantry_df['유통기한'] = pd.to_datetime(pantry_df['유통기한'], errors='coerce').dt.date
-    pantry_df['수량'] = pd.to_numeric(pantry_df['수량'], errors='coerce').fillna(1).astype(int)
 
 st.markdown('<div class="main-title">🍳 오늘 뭐 먹지?</div>', unsafe_allow_html=True)
 
@@ -281,18 +266,12 @@ elif st.session_state['current_view'] == "냉장고 관리":
                     except: d_day_str = ""; display_style = ""
 
                 with st.container(border=True):
-                    sc1, sc2, sc3, sc4 = st.columns([3, 1, 1, 1])
-                    sc1.markdown(f"**{icon} {row['재료명']}** : {row['수량']}개 <span style='{display_style} font-size:0.8em'>{d_day_str}</span>", unsafe_allow_html=True)
+                    # [수정됨] 수량 표시 제거 및 레이아웃 단순화
+                    sc1, sc2, sc3 = st.columns([3, 2, 1])
+                    sc1.markdown(f"**{icon} {row['재료명']}**")
+                    sc2.markdown(f"<span style='{display_style} font-size:0.9em'>{d_day_str}</span>", unsafe_allow_html=True)
                     
-                    with sc2: 
-                        if st.button("➕", key=f"p{idx}"): 
-                            pantry_df.at[idx, '수량'] += 1
-                            save_data_overwrite(pantry_df, PANTRY_TAB); st.rerun()
                     with sc3: 
-                        if st.button("➖", key=f"m{idx}"):
-                             if pantry_df.at[idx, '수량'] > 0: pantry_df.at[idx, '수량'] -= 1
-                             save_data_overwrite(pantry_df, PANTRY_TAB); st.rerun()
-                    with sc4: 
                         if st.button("🗑️", key=f"d{idx}"): 
                             pantry_df = pantry_df.drop(idx)
                             save_data_overwrite(pantry_df, PANTRY_TAB); st.rerun()
@@ -313,9 +292,8 @@ elif st.session_state['current_view'] == "냉장고 관리":
         with chk_col1: st.checkbox("🥫 소스", key="chk_sauce")
         with chk_col2: st.checkbox("🧂 조미료", key="chk_season")
         
-        col_q, col_d = st.columns(2)
-        with col_q: st.text_input("수량", placeholder="예: 1판", key="input_qty")
-        with col_d: st.date_input("유통기한", key="input_date")
+        # [수정됨] 수량 입력창 제거
+        st.date_input("유통기한", key="input_date")
         
         st.write("") 
         st.button("✨ 냉장고에 넣기", use_container_width=True, on_click=handle_add_pantry)
