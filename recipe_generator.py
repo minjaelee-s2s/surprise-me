@@ -12,7 +12,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import time
 
 # ===============================
-# 🔥 [UPDATED] 재료 텍스트 청소기 (단위, 설명 제거)
+# 🔥 재료 분류 및 텍스트 정리 도구
 # ===============================
 
 IGNORABLE_INGREDIENTS = {
@@ -27,58 +27,33 @@ IGNORABLE_INGREDIENTS = {
 PORK_EQUIVALENTS = {"목살", "삼겹살", "앞다리살", "뒷다리살", "대패삼겹살", "돼지고기", "다짐육"}
 
 def clean_ingredient_text(text):
-    """
-    '돼지고기 목살 200g(송송 썬 것)' -> '돼지고기 목살'로 변환
-    """
     text = str(text)
-    # 1. 괄호 안의 내용 제거
     text = re.sub(r'\(.*?\)', '', text)
-    # 2. 숫자+단위 제거 (200g, 1/3스푼, 1개, 한 바퀴 등)
     text = re.sub(r'\d+(?:g|kg|ml|L|l|개|스푼|큰술|작은술|컵|마리|모|봉|인분|t|T)?', '', text)
-    text = re.sub(r'\d+/\d+(?:스푼|컵|큰술)?', '', text) # 1/3스푼 같은 분수 형태
-    text = re.sub(r'(?:한|두|세|네|반)\s*(?:바퀴|줌|꼬집|스푼|큰술|컵)', '', text) # 한 바퀴, 반 줌 등
-    # 3. 특수문자 제거 및 공백 정리
+    text = re.sub(r'\d+/\d+(?:스푼|컵|큰술)?', '', text) 
+    text = re.sub(r'(?:한|두|세|네|반)\s*(?:바퀴|줌|꼬집|스푼|큰술|컵)', '', text) 
     text = re.sub(r'[^\w\s]', '', text) 
     return text.strip()
 
 def normalize_pantry(pantry_list):
-    """냉장고 재료 정규화 (돼지고기류 통합)"""
     pantry = set(pantry_list)
     if any(meat in pantry for meat in PORK_EQUIVALENTS):
         pantry.add("돼지고기")
     return pantry
 
 def check_is_present(recipe_ing, pantry_set):
-    """
-    레시피 재료가 냉장고에 있는지 확인 (똑똑한 비교)
-    """
     cleaned_ing = clean_ingredient_text(recipe_ing)
-    
-    # 1. 무시해도 되는 재료면 통과
     for ignore in IGNORABLE_INGREDIENTS:
-        if ignore in cleaned_ing:
-            return True
-            
-    # 2. 돼지고기류 체크
+        if ignore in cleaned_ing: return True
     if any(pork in cleaned_ing for pork in PORK_EQUIVALENTS):
-        if "돼지고기" in pantry_set:
-            return True
-            
-    # 3. 일반 재료 체크 (냉장고 재료가 레시피 재료 문자열에 포함되는지)
-    # 예: 냉장고 '김치' -> 레시피 '묵은지 김치' (포함되므로 통과)
+        if "돼지고기" in pantry_set: return True
     for p_item in pantry_set:
-        if p_item in cleaned_ing:
-            return True
-            
+        if p_item in cleaned_ing: return True
     return False
 
 def score_recipe(pantry_set, recipe_row):
-    """점수 계산"""
     ingredients = [x.strip() for x in str(recipe_row["필수재료"]).split(",")]
-    match_count = 0
-    for ing in ingredients:
-        if check_is_present(ing, pantry_set):
-            match_count += 1
+    match_count = sum(1 for ing in ingredients if check_is_present(ing, pantry_set))
     return match_count
 
 def format_steps(text):
@@ -131,6 +106,8 @@ def apply_cute_style():
             border-radius: 15px !important; border: 2px solid #AED581 !important; background-color: #F1F8E9 !important; padding: 15px !important;
         }
         div[data-baseweb="radio"] label, div[data-baseweb="checkbox"] label { font-family: 'Gowun Dodum', sans-serif !important; }
+        /* 탭 스타일링 */
+        button[data-baseweb="tab"] { font-family: 'Gowun Dodum', sans-serif !important; font-size: 1.1rem !important; }
         </style>
     """, unsafe_allow_html=True)
 
@@ -142,7 +119,7 @@ def get_gsheet_client():
     client = gspread.authorize(creds)
     return client
 
-# --- 데이터 로드 ---
+# --- 데이터 로드 (보관장소 컬럼 추가) ---
 @st.cache_data(ttl=10)
 def load_data(tab_name, columns):
     try:
@@ -203,70 +180,38 @@ def analyze_recipe_image_with_ai(api_key, images):
 def get_ai_recommendations(api_key, pantry_list, recipe_list, excluded_list):
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel("gemini-1.5-flash")
-
     pantry_set = normalize_pantry(pantry_list)
-
-    # 1. 제외 레시피 필터링
     filtered_recipes = [r for r in recipe_list if r["요리명"] not in excluded_list]
 
-    # 2. Python 점수 계산
     scored = []
     for r in filtered_recipes:
         score = score_recipe(pantry_set, r)
-        if score > 0:
-            scored.append((r, score))
+        if score > 0: scored.append((r, score))
     scored.sort(key=lambda x: x[1], reverse=True)
 
-    # 3. 추천 대상 없으면 빈 리스트 반환
-    if not scored and filtered_recipes:
-        scored = [(filtered_recipes[0], 0)]
-    elif not scored and not filtered_recipes:
-        return {"recommendations": []}
+    if not scored and filtered_recipes: scored = [(filtered_recipes[0], 0)]
+    elif not scored and not filtered_recipes: return {"recommendations": []}
 
     top_recipe = scored[0][0]
     
-    # 🔥 [수정됨] 부족한 재료 파이썬이 직접 계산 (단위/설명 무시하고 비교)
     raw_ingredients = [x.strip() for x in str(top_recipe['필수재료']).split(",")]
-    missing_items = []
-    
-    for raw_ing in raw_ingredients:
-        # 재료가 없으면 missing에 추가 (Ignorable 및 Pork 로직 통과 여부 확인)
-        if not check_is_present(raw_ing, pantry_set):
-            missing_items.append(raw_ing)
-    
+    missing_items = [raw_ing for raw_ing in raw_ingredients if not check_is_present(raw_ing, pantry_set)]
     missing_text = ", ".join(missing_items) if missing_items else "없음 (완벽해요!)"
 
-    # AI에게 멘트 요청
     prompt = f"""
     너는 긍정적인 요리 친구야.
-    
     추천 메뉴: {top_recipe['요리명']}
     부족한 재료: {missing_text}
-    
     이 요리를 추천하는 이유를 한 문장으로 긍정적으로 말해줘.
-    부족한 재료가 있어도 "괜찮아요, 응용해서 만들면 돼요!"라고 격려해줘.
-
     출력 형식(JSON):
-    {{
-      "recommendations": [
-        {{
-          "name": "{top_recipe['요리명']}",
-          "reason": "AI의 추천 멘트",
-          "missing": "{missing_text}"
-        }}
-      ]
-    }}
+    {{ "recommendations": [ {{ "name": "{top_recipe['요리명']}", "reason": "AI의 추천 멘트", "missing": "{missing_text}" }} ] }}
     """
-
     try:
         response = model.generate_content(prompt)
         match = re.search(r'\{.*\}', response.text, re.DOTALL)
-        if match:
-            return json.loads(match.group(0))
-        else:
-            raise ValueError("No JSON")
+        if match: return json.loads(match.group(0))
+        else: raise ValueError("No JSON")
     except:
-        # [수정됨] 에러 메시지 삭제하고 자연스러운 멘트로 대체
         return {
             "recommendations": [
                 {
@@ -277,23 +222,27 @@ def get_ai_recommendations(api_key, pantry_list, recipe_list, excluded_list):
             ]
         }
 
-# --- 콜백 함수 ---
+# --- [수정됨] 콜백 함수 (보관장소 처리 추가) ---
 def handle_add_pantry():
     n = st.session_state.get('input_name', "").strip()
     d = st.session_state.get('input_date', date.today())
     is_sauce = st.session_state.get('chk_sauce', False)
     is_seasoning = st.session_state.get('chk_season', False)
+    storage_raw = st.session_state.get('input_storage', '🧊 냉장고')
+    storage = "냉동실" if "냉동실" in storage_raw else "냉장고"
 
     if n:
         final_d = "" if (is_sauce or is_seasoning) else str(d)
-        current_df = load_data(PANTRY_TAB, ["재료명", "유통기한"])
+        current_df = load_data(PANTRY_TAB, ["재료명", "유통기한", "보관장소"]) # 컬럼 추가
+        
         if n in current_df['재료명'].values:
             current_df.loc[current_df['재료명'] == n, '유통기한'] = final_d
+            current_df.loc[current_df['재료명'] == n, '보관장소'] = storage
             save_data_overwrite(current_df, PANTRY_TAB)
-            st.session_state['toast_msg'] = f"🔄 '{n}' 업데이트!"
+            st.session_state['toast_msg'] = f"🔄 '{n}' 정보 업데이트!"
         else:
-            add_row_to_sheet([n, final_d], PANTRY_TAB)
-            st.session_state['toast_msg'] = f"🧊 '{n}' 냉장고에 쏙!"
+            add_row_to_sheet([n, final_d, storage], PANTRY_TAB)
+            st.session_state['toast_msg'] = f"{storage_raw[:2]} '{n}' {storage}에 쏙!"
         
         st.session_state['input_name'] = ""
         st.session_state['chk_sauce'] = False
@@ -307,13 +256,8 @@ apply_cute_style()
 
 if 'toast_msg' not in st.session_state: st.session_state['toast_msg'] = None
 if 'warning_msg' not in st.session_state: st.session_state['warning_msg'] = None
-
-if st.session_state['toast_msg']:
-    st.toast(st.session_state['toast_msg'], icon="✅")
-    st.session_state['toast_msg'] = None
-if st.session_state['warning_msg']:
-    st.warning(st.session_state['warning_msg'])
-    st.session_state['warning_msg'] = None
+if st.session_state['toast_msg']: st.toast(st.session_state['toast_msg'], icon="✅"); st.session_state['toast_msg'] = None
+if st.session_state['warning_msg']: st.warning(st.session_state['warning_msg']); st.session_state['warning_msg'] = None
 
 if 'current_view' not in st.session_state: st.session_state['current_view'] = '요리하기'
 if 'highlight_items' not in st.session_state: st.session_state['highlight_items'] = []
@@ -350,10 +294,14 @@ with st.sidebar:
         st.success("처음부터 다시 추천합니다!")
         st.rerun()
 
-pantry_df = load_data(PANTRY_TAB, ["재료명", "유통기한"])
+# [수정됨] 보관장소 데이터 로드 및 결측치 처리 (기존 데이터 호환)
+pantry_df = load_data(PANTRY_TAB, ["재료명", "유통기한", "보관장소"])
+if not pantry_df.empty:
+    pantry_df['유통기한'] = pd.to_datetime(pantry_df['유통기한'], errors='coerce').dt.date
+    pantry_df['보관장소'] = pantry_df['보관장소'].replace("", "냉장고").fillna("냉장고")
+
 recipe_df = load_data(RECIPE_TAB, ["요리명", "필수재료", "링크", "조리법"])
 today = date.today()
-if not pantry_df.empty: pantry_df['유통기한'] = pd.to_datetime(pantry_df['유통기한'], errors='coerce').dt.date
 
 st.markdown('<div class="main-title">🍳 오늘 뭐 먹지?</div>', unsafe_allow_html=True)
 
@@ -366,12 +314,11 @@ if st.session_state['current_view'] == "요리하기":
     if pantry_df.empty or recipe_df.empty:
          st.warning("냉장고가 비었거나 레시피북이 비어있어요! 데이터를 먼저 채워주세요.")
     else:
-        st.info("💡 AI가 냉장고 속 재료와 대체 가능성을 분석해서 메뉴를 골라줍니다.")
-        
+        st.info("💡 파이썬과 AI가 협동해서 최적의 메뉴를 골라줍니다.")
         btn_text = "🎲 다음 메뉴 추천해줘!" if st.session_state['shown_recipes'] else "🧑‍🍳 AI! 첫 번째 메뉴 추천해줘"
         
         if st.button(btn_text, use_container_width=True):
-            with st.spinner("메뉴 선정 중... (Python 분석 + AI 멘트 🧐)"):
+            with st.spinner("메뉴 선정 중... 🧐"):
                 key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY"))
                 if key:
                     pantry_list = pantry_df['재료명'].tolist()
@@ -396,7 +343,6 @@ if st.session_state['current_view'] == "요리하기":
 
         if st.session_state['ai_recommendation'] is not None:
             recs = st.session_state['ai_recommendation']
-            
             if len(recs) == 0:
                 st.warning("🥲 추천할 메뉴가 정말 없어요.")
             else:
@@ -409,7 +355,7 @@ if st.session_state['current_view'] == "요리하기":
                              st.markdown(f"""
                             <div style="background-color:#FFF3E0; padding:10px; border-radius:10px; margin-bottom:10px; border:1px solid #FFCC80;">
                                 ⚠️ <b>부족한 재료:</b> {missing_info} <br>
-                                <span style="font-size:0.8em; color:#666;">(기본 양념이나 부재료는 없어도 괜찮아요!)</span>
+                                <span style="font-size:0.8em; color:#666;">(기본 양념이나 부재료는 생략/대체 가능해요!)</span>
                             </div>
                             """, unsafe_allow_html=True)
                         else:
@@ -425,47 +371,76 @@ if st.session_state['current_view'] == "요리하기":
                             
                             if original['링크']: st.markdown(f"👉 [레시피 링크]({original['링크']})")
                             
-                            if st.button(f"😋 {rec['name']} 요리 완료! (재료 소진)", key=f"cook_{rec['name']}"):
+                            if st.button(f"😋 {rec['name']} 요리 완료! (재료 소진 알림)", key=f"cook_{rec['name']}"):
                                  st.session_state['highlight_items'] = [x.strip() for x in str(original['필수재료']).split(',')]
                                  st.session_state['current_view'] = "냉장고 관리"
                                  st.rerun()
 
 # ==========================================
-# 뷰 2: 냉장고 관리 & 뷰 3: 레시피 관리 (기존 유지)
+# 뷰 2: 냉장고 관리 (냉장고/냉동실 분리)
 # ==========================================
 elif st.session_state['current_view'] == "냉장고 관리":
     st.header("🧊 우리집 냉장고")
     c1, c2 = st.columns([1.5, 1])
+    
     with c1:
         if st.session_state['highlight_items']:
-            st.error(f"🔥 방금 사용한 재료: {', '.join(st.session_state['highlight_items'])}")
+            st.error(f"🔥 방금 사용한 재료 (정리 필요): {', '.join(st.session_state['highlight_items'])}")
             if st.button("알림 끄기"): st.session_state['highlight_items'] = []; st.rerun()
-        if not pantry_df.empty:
-            for idx, row in pantry_df.iterrows():
-                icon = "🔴" if row['재료명'] in st.session_state['highlight_items'] else "🟢"
-                d_day_str = "(소스/조미료)" if pd.isna(row['유통기한']) else (f"({(row['유통기한'] - today).days}일 남음)" if (row['유통기한'] - today).days >= 0 else "(지남!!)")
-                display_style = "color:#8D6E63;" if pd.isna(row['유통기한']) or (row['유통기한'] - today).days >= 3 else "color:#FF7043;"
-                
-                with st.container(border=True):
-                    sc1, sc2 = st.columns([5, 1])
-                    sc1.markdown(f"**{icon} {row['재료명']}** <span style='{display_style} font-size:0.9em; margin-left:10px;'>{d_day_str}</span>", unsafe_allow_html=True)
-                    with sc2: 
-                        if st.button("🗑️", key=f"d{idx}"): 
-                            pantry_df = pantry_df.drop(idx)
-                            save_data_overwrite(pantry_df, PANTRY_TAB); st.rerun()
+            
+        # [NEW] 냉장고 / 냉동실 탭 생성
+        tab_fridge, tab_freezer = st.tabs(["🧊 냉장고", "❄️ 냉동실"])
+        
+        # 탭별 재료 렌더링을 위한 반복문
+        for storage_val, current_tab in zip(["냉장고", "냉동실"], [tab_fridge, tab_freezer]):
+            with current_tab:
+                if not pantry_df.empty:
+                    sub_df = pantry_df[pantry_df['보관장소'] == storage_val]
+                    if sub_df.empty:
+                        st.info("비어있습니다! 재료를 채워주세요.")
+                    else:
+                        for idx, row in sub_df.iterrows():
+                            icon = "🔴" if row['재료명'] in st.session_state['highlight_items'] else "🟢"
+                            
+                            if pd.isna(row['유통기한']) or str(row['유통기한']).strip() == "": 
+                                d_day_str = "(소스/조미료)"
+                                display_style = "color:#8D6E63;" 
+                            else:
+                                days_left = (row['유통기한'] - today).days
+                                d_day_str = f"({days_left}일 남음)" if days_left >= 0 else "(지남!!)"
+                                display_style = "color:#FF7043;" if days_left < 3 else "color:#8D6E63;"
+
+                            with st.container(border=True):
+                                sc1, sc2 = st.columns([5, 1])
+                                sc1.markdown(f"**{icon} {row['재료명']}** <span style='{display_style} font-size:0.9em; margin-left:10px;'>{d_day_str}</span>", unsafe_allow_html=True)
+                                with sc2: 
+                                    if st.button("🗑️", key=f"d_{idx}"): 
+                                        pantry_df = pantry_df.drop(idx)
+                                        save_data_overwrite(pantry_df, PANTRY_TAB)
+                                        st.rerun()
 
     with c2:
         st.subheader("🛒 재료 채우기")
         db1, db2 = st.columns([1, 1])
         if db1.button("📅 +1주"): st.session_state['input_date'] = today + timedelta(weeks=1); st.rerun()
         if db2.button("📅 +1달"): st.session_state['input_date'] = today + timedelta(days=30); st.rerun()
+        
         st.text_input("재료명 (필수!)", key="input_name")
+        
+        # [NEW] 보관 장소 선택 (라디오 버튼)
+        st.radio("보관 장소", ["🧊 냉장고", "❄️ 냉동실"], horizontal=True, key="input_storage")
+        
         c1, c2 = st.columns(2)
         with c1: st.checkbox("🥫 소스", key="chk_sauce")
         with c2: st.checkbox("🧂 조미료", key="chk_season")
         st.date_input("유통기한", key="input_date")
-        st.write(""); st.button("✨ 냉장고에 넣기", use_container_width=True, on_click=handle_add_pantry)
+        
+        st.write("")
+        st.button("✨ 보관함에 넣기", use_container_width=True, on_click=handle_add_pantry)
 
+# ==========================================
+# 뷰 3: 레시피 관리
+# ==========================================
 elif st.session_state['current_view'] == "레시피 관리":
     st.header("📖 나만의 레시피북")
     t1, t2 = st.tabs(["➕ 레시피 등록", "📝 목록 보기"])
