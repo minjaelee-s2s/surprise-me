@@ -161,6 +161,7 @@ def add_row_to_sheet(row_data, tab_name):
         st.error(f"추가 실패: {e}")
 
 # --- AI 이미지 분석 (강력한 추출기로 업그레이드) ---
+# --- AI 이미지 분석 (JSON 강제 모드 + 에러 원인 추적기 탑재) ---
 def analyze_recipe_image_with_ai(api_key, images):
     genai.configure(api_key=api_key)
     models = ['gemini-1.5-flash', 'gemini-2.0-flash']
@@ -168,21 +169,35 @@ def analyze_recipe_image_with_ai(api_key, images):
     prompt = """
     이 음식 사진들을 분석해서 [요리 이름], [필수 재료], [조리법]을 추출해.
     절대 다른 설명이나 인사말은 하지 말고, 오직 아래 JSON 형식으로만 응답해.
-    {"name": "요리명", "ingredients": "재료1, 재료2", "steps": "1. 과정1\\n2. 과정2"}
+    {"name": "요리명", "ingredients": "재료1, 재료2", "steps": "조리법"}
     """
     
+    last_error = ""
     for m in models:
         try:
-            model = genai.GenerativeModel(m)
+            # 🔥 [핵심] 최신 기능: AI가 무조건 JSON 형식으로만 대답하도록 시스템 강제
+            model = genai.GenerativeModel(m, generation_config={"response_mime_type": "application/json"})
             response = model.generate_content([prompt] + images)
             
-            # 🔥 [핵심] 텍스트 속에 숨어있는 JSON 괄호 {} 부분만 정확히 파내기
-            match = re.search(r'\{.*\}', response.text, re.DOTALL)
-            if match:
-                return json.loads(match.group(0))
+            text = response.text.replace("```json", "").replace("```", "").strip()
+            
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                # 혹시라도 파싱 에러가 나면 정규식으로 알맹이만 구출 시도
+                match = re.search(r'\{.*\}', text, re.DOTALL)
+                if match:
+                    return json.loads(match.group(0))
+                else:
+                    raise ValueError(f"JSON 파싱 실패 (응답 일부): {text[:50]}...")
+                    
         except Exception as e:
+            # 에러가 나면 조용히 넘어가지 않고, last_error 변수에 내용을 적어둡니다.
+            last_error = str(e)
             continue
             
+    # 🔥 [핵심] 모든 모델이 실패했다면, 진짜 실패 원인을 화면에 띄워줍니다.
+    st.error(f"🚨 [AI 통신/분석 실패] 상세 원인: {last_error}")
     return None
     
 # --- AI 메뉴 추천 ---
@@ -491,4 +506,5 @@ elif st.session_state['current_view'] == "레시피 관리":
             if st.button("💾 저장"):
                 clean = edited[edited['요리명'].notna() & (edited['요리명'] != "")].drop_duplicates(subset=['요리명', '링크'])
                 save_data_overwrite(clean, RECIPE_TAB); st.session_state['toast_msg'] = "저장 완료!"; st.rerun()
+
 
