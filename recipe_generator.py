@@ -160,22 +160,31 @@ def add_row_to_sheet(row_data, tab_name):
     except Exception as e:
         st.error(f"추가 실패: {e}")
 
-# --- AI 이미지 분석 ---
+# --- AI 이미지 분석 (강력한 추출기로 업그레이드) ---
 def analyze_recipe_image_with_ai(api_key, images):
     genai.configure(api_key=api_key)
     models = ['gemini-1.5-flash', 'gemini-2.0-flash']
+    
     prompt = """
-    이 음식 사진들을 분석해서 [요리 이름], [필수 재료], [조리법]을 추출해 JSON으로 반환해.
-    형식: {"name": "...", "ingredients": "재료1, 재료2", "steps": "..."}
+    이 음식 사진들을 분석해서 [요리 이름], [필수 재료], [조리법]을 추출해.
+    절대 다른 설명이나 인사말은 하지 말고, 오직 아래 JSON 형식으로만 응답해.
+    {"name": "요리명", "ingredients": "재료1, 재료2", "steps": "1. 과정1\\n2. 과정2"}
     """
+    
     for m in models:
         try:
             model = genai.GenerativeModel(m)
             response = model.generate_content([prompt] + images)
-            return json.loads(response.text.replace("```json", "").replace("```", ""))
-        except: continue
+            
+            # 🔥 [핵심] 텍스트 속에 숨어있는 JSON 괄호 {} 부분만 정확히 파내기
+            match = re.search(r'\{.*\}', response.text, re.DOTALL)
+            if match:
+                return json.loads(match.group(0))
+        except Exception as e:
+            continue
+            
     return None
-
+    
 # --- AI 메뉴 추천 ---
 def get_ai_recommendations(api_key, pantry_list, recipe_list, excluded_list):
     genai.configure(api_key=api_key)
@@ -449,22 +458,37 @@ elif st.session_state['current_view'] == "레시피 관리":
             files = st.file_uploader("요리 사진", accept_multiple_files=True)
             if files and st.button("🪄 AI 분석"):
                 key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY"))
-                if not key: st.error("API 키 필요")
+                if not key: 
+                    st.error("API 키가 필요합니다!")
                 else:
-                    with st.spinner("분석 중..."):
+                    with st.spinner("AI가 사진을 뚫어져라 분석 중입니다... 🧐"):
                         imgs = [Image.open(f) for f in files]
                         res = analyze_recipe_image_with_ai(key, imgs)
-                        if res: st.session_state['ai_result'] = res; st.success("성공!"); st.rerun()
+                        
+                        # 🔥 실패했을 때도 사용자에게 알려주기
+                        if res: 
+                            st.session_state['ai_result'] = res
+                            st.success("사진 분석 성공! 아래 폼을 확인해주세요 ✨")
+                            st.rerun()
+                        else:
+                            st.error("😭 AI가 사진에서 레시피를 추출하지 못했어요. 다른 사진으로 시도하거나 직접 입력해주세요!")
+
         with st.form("rec_form"):
             default = st.session_state['ai_result']
             rn = st.text_input("요리 이름", value=default.get('name', ''))
             ri = st.text_input("필수 재료", value=default.get('ingredients', ''))
             rs = st.text_area("조리법", value=default.get('steps', ''), height=150)
             rl = st.text_input("참고 링크")
-            st.write(""); st.form_submit_button("✨ 저장", on_click=lambda: (add_row_to_sheet([rn, ri, rl, rs], RECIPE_TAB), st.session_state.update({'toast_msg': "저장 완료!", 'ai_result': {}})))
+            st.write("")
+            if st.form_submit_button("✨ 저장"):
+                add_row_to_sheet([rn, ri, rl, rs], RECIPE_TAB)
+                st.session_state['ai_result'] = {}
+                st.session_state['toast_msg'] = "레시피 저장 완료!"
+                st.rerun()
     with t2:
         if not recipe_df.empty:
             edited = st.data_editor(recipe_df, num_rows="dynamic", use_container_width=True, key="recipe_editor")
             if st.button("💾 저장"):
                 clean = edited[edited['요리명'].notna() & (edited['요리명'] != "")].drop_duplicates(subset=['요리명', '링크'])
                 save_data_overwrite(clean, RECIPE_TAB); st.session_state['toast_msg'] = "저장 완료!"; st.rerun()
+
