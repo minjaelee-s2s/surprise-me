@@ -164,8 +164,7 @@ def add_row_to_sheet(row_data, tab_name):
 # --- AI 이미지 분석 (JSON 강제 모드 + 에러 원인 추적기 탑재) ---
 def analyze_recipe_image_with_ai(api_key, images):
     genai.configure(api_key=api_key)
-    models = ['gemini-1.5-flash', 'gemini-2.0-flash']
-    
+    models = ['gemini-2.5-flash']
     prompt = """
     이 음식 사진들을 분석해서 [요리 이름], [필수 재료], [조리법]을 추출해.
     절대 다른 설명이나 인사말은 하지 말고, 오직 아래 JSON 형식으로만 응답해.
@@ -203,7 +202,7 @@ def analyze_recipe_image_with_ai(api_key, images):
 # --- AI 메뉴 추천 ---
 def get_ai_recommendations(api_key, pantry_list, recipe_list, excluded_list):
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    model = genai.GenerativeModel("gemini-2.5-flash")
     pantry_set = normalize_pantry(pantry_list)
     filtered_recipes = [r for r in recipe_list if r["요리명"] not in excluded_list]
 
@@ -506,5 +505,6 @@ elif st.session_state['current_view'] == "레시피 관리":
             if st.button("💾 저장"):
                 clean = edited[edited['요리명'].notna() & (edited['요리명'] != "")].drop_duplicates(subset=['요리명', '링크'])
                 save_data_overwrite(clean, RECIPE_TAB); st.session_state['toast_msg'] = "저장 완료!"; st.rerun()
+
 
 
