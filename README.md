@@ -76,4 +76,7 @@ This project was an exercise in understanding the **Full-Cycle of Web Developmen
 ---
 
 ## 📸 Screenshots
-*(여기에 앱 실행 화면을 캡처해서 넣어주세요. ex: 냉장고 관리 탭, 메뉴 추천 탭, AI 레시피 분석 탭 등)*
+<img width="2559" height="1347" alt="image" src="https://github.com/user-attachments/assets/83ddacf8-f391-42ac-a719-1d59ca1894df" /><img width="2559" height="1345" alt="image" src="https://github.com/user-attachments/assets/f57b151f-cbe6-4909-aecc-18a484117cca" /><img width="2559" height="1344" alt="image" src="https://github.com/user-attachments/assets/f1588756-13d0-4f2b-882c-cb96ab9833ba" /><img width="2557" height="1347" alt="image" src="https://github.com/user-attachments/assets/15c51d6b-e740-4fa6-990f-02d1ebb63e4f" />
+
+
+
