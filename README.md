@@ -1,4 +1,4 @@
-# 🍳 What's for Dinner Tonight? (오늘 뭐 먹지?)
+# 🍳 Surprise Me (오늘 뭐 먹지?)
 
 > **Personal Usage** | **Vibe Coded** | **AI-Powered**
 
